@@ -1,0 +1,4 @@
+numpy
+sounddevice
+# Install pywhispercpp with Metal separately (see run.sh):
+#   CMAKE_ARGS="-DGGML_METAL=ON" pip install git+https://github.com/absadiki/pywhispercpp --no-binary=pywhispercpp

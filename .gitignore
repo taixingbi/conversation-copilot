@@ -1,0 +1,23 @@
+.env
+.env copy
+.env.*
+!.env.example
+
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+log/
+*.log
+
+.DS_Store
+.idea/
+.vscode/
+
+# Whisper weights (keep source; models are large)
+*.bin
+*.gguf
+models/

@@ -1,0 +1,15 @@
+# Whisper model size: medium | large
+WHISPER_MODEL=medium
+
+# Audio devices: index or name substring. Empty = default mic / auto-detect loopback.
+# List devices:  python main.py --list-devices
+AUDIO_DEVICE=C270
+EXTERNAL_AUDIO_DEVICE=BlackHole
+
+# Bedrock Function URL (OpenAI-compatible /v1/chat/completions)
+# https://github.com/taixingbi/bedrock-tenants
+# Paste the Lambda Function URL, e.g. https://xxxx.lambda-url.us-east-1.on.aws/
+FUNCTION_URL=https://qxilkeb5oiywg7gsdarjzbaq3m0yetpq.lambda-url.us-east-1.on.aws/
+INFERENCE_API_KEY=1234
+LLM_MODEL=qwen3-next-80b-a3b
+
