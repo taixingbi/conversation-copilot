@@ -37,12 +37,12 @@ _FILLER = re.compile(
     r"that's all for (?:today|now|this)|"
     r"^(?:bye(?:[\s-]*bye)?|good[\s-]*bye)[.!?]*$|"
     r"^cheers[.!?]*$|"
-    r"^(?:all\s*right|alright)[.!?]*$",
+    r"^(?:right|all\s*right|alright)[.!?]*$",
     re.I,
 )
 GREET = re.compile(
     r"^(hello|hi|hey|thanks?|thank you|okay|ok|yeah|yes|no|mm-?hmm|"
-    r"all\s*right|alright)[.!?]*$",
+    r"right|all\s*right|alright)[.!?]*$",
     re.I,
 )
 _TAG = re.compile(r"non-?english|foreign language|inaudible|end of audio", re.I)
