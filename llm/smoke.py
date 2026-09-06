@@ -73,6 +73,11 @@ def main() -> None:
         fail("chat returned empty")
     ok(f"chat  {hello[:120]}")
 
+    streamed = "".join(client.chat_stream("Say hi in three words.", max_tokens=32))
+    if not streamed.strip():
+        fail("chat_stream returned empty")
+    ok(f"stream {streamed[:120]}")
+
     llm = LlmAnswerer(function_url=url, api_key=key, model=model)
     for i, (ext, needles) in enumerate(CASES, 1):
         question, answer = llm.qa_from_ext(ext)

@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
+from metrics import LatencyTracker
 from questions import (
     CYAN,
     DIM,
@@ -24,9 +25,10 @@ from questions import (
     is_sure_question,
     paint,
     questions_path_for,
+    safe_print,
 )
 from speakers import SAMPLE_RATE, OnlineSpeakerTracker, SpeechVad, ensure_models, tracking_enabled
-from stt import SttWorker, Transcriber, resolve_model_name
+from stt import SttWorker, Transcriber, resolve_backend, resolve_model_name
 
 warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*")
 
@@ -146,11 +148,8 @@ def emit(log_file, label: str, text: str) -> str:
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [{label}] {text}\n"
     shown = f"[{ts}] [{label}] {text}"
-    if is_ext_label(label):
-        shown = paint(shown, CYAN)
-    else:
-        shown = paint(shown, DIM)
-    print(shown, flush=True)
+    style = CYAN if is_ext_label(label) else DIM
+    safe_print(shown, style)
     log_file.write(line)
     log_file.flush()
     return ts
@@ -198,12 +197,20 @@ def drain_queue(q: queue.Queue) -> np.ndarray | None:
     return audio.astype(np.float32, copy=False)
 
 
-def make_extractor(transcribe_path: str) -> QuestionExtractor:
+def make_extractor(transcribe_path: str, metrics: LatencyTracker) -> QuestionExtractor:
     url = (os.environ.get("FUNCTION_URL") or "").strip()
     key = (os.environ.get("INFERENCE_API_KEY") or os.environ.get("API_KEY") or "1234").strip()
     model = (os.environ.get("LLM_MODEL") or "qwen3-next-80b-a3b").strip()
+    fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
     path = questions_path_for(transcribe_path)
-    return QuestionExtractor(function_url=url, api_key=key, model=model, out_path=path)
+    return QuestionExtractor(
+        function_url=url,
+        api_key=key,
+        model=model,
+        fast_model=fast,
+        out_path=path,
+        metrics=metrics,
+    )
 
 
 def parse_args():
@@ -255,21 +262,27 @@ def main():
     tracker = OnlineSpeakerTracker(emb_path) if track and emb_path is not None else None
 
     model_name = resolve_model_name()
+    backend = resolve_backend(model_name)
     log_dir = os.environ.get("TRANSCRIBE_LOG_DIR", str(app_dir / "log"))
     os.makedirs(log_dir, exist_ok=True)
     log_filename = os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_transcribe.txt")
 
-    extractor = make_extractor(log_filename)
+    metrics = LatencyTracker()
+    extractor = make_extractor(log_filename, metrics)
 
     logging.getLogger("pywhispercpp").setLevel(logging.ERROR)
-    print(f"Loading Whisper {model_name} (metal greedy) ...", flush=True)
-    worker = SttWorker(Transcriber(model_name), tracker)
+    print(f"Loading Whisper {model_name} ({backend}) ...", flush=True)
+    worker = SttWorker(Transcriber(model_name, backend), tracker)
+    chunk = os.environ.get("STT_CHUNK_SEC", "0.4")
+    fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
 
     print(
         f"Listening  mic={device_label(mic_idx)}"
         + (f"  ext={device_label(ext_idx)}" if ext_idx is not None else "  ext=none")
         + (f"  speakers={'on' if tracker else 'off'}")
-        + f"  stt={model_name}/metal",
+        + f"  stt={model_name}/{backend}"
+        + f"  chunk={chunk}s"
+        + (f"  fast={fast}" if fast else ""),
         flush=True,
     )
     print(f"log   {log_filename}", flush=True)
@@ -294,11 +307,14 @@ def main():
                 )
             )
 
-        def handle_texts(out_label: str, texts: list[str]) -> None:
+        def handle_texts(out_label: str, texts: list[str], info: dict | None = None) -> None:
+            info = info or {}
+            if info.get("stt_ms"):
+                metrics.observe("stt_ms", float(info["stt_ms"]))
             for text in texts:
                 norm = _norm_text(text)
                 prev = last_said.get(out_label)
-                if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or norm in prev[1] or prev[1] in norm):
+                if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or (norm and norm in prev[1])):
                     continue
                 last_said[out_label] = (time.time(), norm)
                 if is_ext_label(out_label):
@@ -307,7 +323,12 @@ def main():
                     continue
                 ts = emit(log_file, out_label, text)
                 if is_ext_label(out_label) or is_sure_question(text):
-                    extractor.add_ext(ts, text)
+                    extractor.add_ext(
+                        ts,
+                        text,
+                        t_mono=info.get("seg_end"),
+                        stt_ms=float(info.get("stt_ms") or 0),
+                    )
 
         try:
             while True:
@@ -317,11 +338,12 @@ def main():
                     if audio is None:
                         continue
                     progressed = True
+                    t_end = time.monotonic()
                     for seg in vads[src_label].accept(audio):
-                        worker.submit(src_label, seg)
-                for out_label, texts in worker.drain():
+                        worker.submit(src_label, seg, t_end=t_end)
+                for out_label, texts, info in worker.drain():
                     progressed = True
-                    handle_texts(out_label, texts)
+                    handle_texts(out_label, texts, info)
                 if not progressed:
                     time.sleep(0.02)
         except KeyboardInterrupt:

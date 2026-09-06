@@ -1,5 +1,12 @@
-# Whisper model size: medium | large  (Metal greedy decode; medium is the live default)
+# Whisper: metal (pywhispercpp/GPU) or faster (faster-whisper int8). auto picks faster if installed.
+# Models: tiny | base | small | medium | large | distil-small | distil-medium | distil-large
+# distil-* needs WHISPER_BACKEND=faster (or auto). Compare latency with tiny/base + faster int8.
 WHISPER_MODEL=medium
+WHISPER_BACKEND=metal
+# WHISPER_DEVICE=cpu
+# WHISPER_COMPUTE=int8
+# Rolling STT snapshots while speaking (seconds). 0 = wait for VAD silence. 0.3–0.5 is true streaming.
+STT_CHUNK_SEC=0.4
 
 # Audio devices: index or name substring. Empty = default mic / auto-detect loopback.
 # List devices:  python main.py --list-devices
@@ -18,4 +25,6 @@ SPEAKER_MAX=4
 FUNCTION_URL=https://qxilkeb5oiywg7gsdarjzbaq3m0yetpq.lambda-url.us-east-1.on.aws/
 INFERENCE_API_KEY=1234
 LLM_MODEL=qwen3-next-80b-a3b
+# Optional small/fast model for a one-sentence draft (<1s). Empty = same as LLM_MODEL.
+# LLM_FAST_MODEL=qwen2.5-7b-instruct
 

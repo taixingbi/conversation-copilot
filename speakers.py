@@ -7,8 +7,9 @@ from pathlib import Path
 import numpy as np
 
 SAMPLE_RATE = 16000
-MIN_SEG_SEC = 0.4
+MIN_SEG_SEC = 0.3
 MAX_SEG_SEC = 2.0
+STREAM_CHUNK_SEC = 0.4
 
 VAD_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 EMB_URL = (
@@ -74,6 +75,9 @@ class SpeechVad:
         self.sample_rate = sample_rate
         self.min_samples = int(MIN_SEG_SEC * sample_rate)
         self.max_samples = int(MAX_SEG_SEC * sample_rate)
+        chunk_sec = float(os.environ.get("STT_CHUNK_SEC", str(STREAM_CHUNK_SEC)))
+        self.chunk_samples = int(chunk_sec * sample_rate) if chunk_sec > 0 else 0
+        self._emitted = 0
 
     def _take(self, n: int | None = None) -> np.ndarray:
         blob = np.concatenate(self._parts) if self._parts else np.zeros((0,), dtype=np.float32)
@@ -105,14 +109,24 @@ class SpeechVad:
             if self.vad.is_speech_detected():
                 self._parts.append(win)
                 self._n += win.size
-                while self._n >= self.max_samples:
-                    segs.append(self._take(self.max_samples))
+                if self.chunk_samples > 0:
+                    while self._n > self.max_samples:
+                        old = self._parts.pop(0)
+                        self._n -= old.size
+                        self._emitted = max(0, self._emitted - old.size)
+                    if self._n >= self.min_samples and self._n - self._emitted >= self.chunk_samples:
+                        segs.append(np.concatenate(self._parts))
+                        self._emitted = self._n
+                else:
+                    while self._n >= self.max_samples:
+                        segs.append(self._take(self.max_samples))
             else:
                 if self._n >= self.min_samples:
                     segs.append(self._take())
                 else:
                     self._parts = []
                     self._n = 0
+                self._emitted = 0
         self.buf = chunk[i:]
         return segs
 
@@ -122,9 +136,12 @@ class SpeechVad:
         while not self.vad.empty():
             self.vad.pop()
         if self._n >= self.min_samples:
-            return [self._take()]
+            segs = [self._take()]
+            self._emitted = 0
+            return segs
         self._parts = []
         self._n = 0
+        self._emitted = 0
         return []
 
 
