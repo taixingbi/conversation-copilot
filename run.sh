@@ -8,7 +8,7 @@ VENV="$APP/venv"
 PY="$VENV/bin/python"
 LOG_DIR="$APP/log"
 
-# Prefer a modern interpreter; Apple CLT python3 is often 3.9 (too old for pywhispercpp).
+# Prefer a modern interpreter; Apple CLT python3 is often 3.9.
 resolve_python() {
   local c
   for c in python3.13 python3.12 python3.11 python3.10 python3; do
@@ -21,7 +21,6 @@ resolve_python() {
 }
 
 if [[ ! -x "$PY" ]]; then
-  # Broken after Python upgrades/uninstalls (dangling symlinks); start fresh.
   if [[ -d "$VENV" ]]; then
     echo "Removing broken venv at $VENV ..."
     rm -rf "$VENV"
@@ -34,11 +33,11 @@ fi
 SITE="$(echo "$VENV"/lib/python*/site-packages)"
 
 need_deps=0
-"$PY" -c "import numpy, sounddevice" 2>/dev/null || need_deps=1
+"$PY" -c "import numpy, sounddevice, sherpa_onnx" 2>/dev/null || need_deps=1
 if [[ "$need_deps" -eq 1 ]]; then
-  echo "Installing numpy / sounddevice..."
+  echo "Installing Python deps..."
   "$PY" -m pip install --upgrade pip
-  "$PY" -m pip install numpy sounddevice
+  "$PY" -m pip install -r "$APP/requirements.txt"
 fi
 
 # pip leaves @rpath pointing at a deleted temp build dir; point it at site-packages.
@@ -78,7 +77,6 @@ p.write_text("".join(lines))
 PY
 }
 
-# whisper.cpp + Metal (must build from source; PyPI wheels are CPU-only)
 fix_pywhisper_rpath
 fix_pywhisper_py39
 export DYLD_FALLBACK_LIBRARY_PATH="$SITE${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"

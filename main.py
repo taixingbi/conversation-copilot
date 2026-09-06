@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import time
+import warnings
 from collections import deque
 from contextlib import ExitStack
 from datetime import datetime
@@ -15,29 +16,23 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from noise import english_only, is_junk_line
 from questions import (
     CYAN,
     DIM,
     YELLOW,
     QuestionExtractor,
+    is_sure_question,
     paint,
     questions_path_for,
 )
+from speakers import SAMPLE_RATE, OnlineSpeakerTracker, SpeechVad, ensure_models, tracking_enabled
+from stt import SttWorker, Transcriber, resolve_model_name
 
-SAMPLE_RATE = 16000
-BLOCK_SEC = 2  # smaller = more realtime, more CPU/GPU work
+warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*")
+
 LOOPBACK_HINTS = ("blackhole", "loopback", "soundflower", "vb-cable", "vb cable")
 ECHO_WINDOW_SEC = 6.0
 ECHO_RATIO = 0.72
-
-# .env values: medium | large  (aliases map to ggml model names)
-MODEL_ALIASES = {
-    "medium": "medium.en",
-    "medium.en": "medium.en",
-    "large": "large-v3",
-    "large-v3": "large-v3",
-}
 
 
 def load_dotenv(path: Path) -> None:
@@ -53,17 +48,15 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
-def resolve_model_name() -> str:
-    raw = os.environ.get("WHISPER_MODEL", "large").strip().lower()
-    if raw not in MODEL_ALIASES:
-        allowed = ", ".join(sorted(MODEL_ALIASES))
-        raise SystemExit(f"Unknown WHISPER_MODEL={raw!r}. Use one of: {allowed}")
-    return MODEL_ALIASES[raw]
+_device_cache: list[tuple[int, dict]] | None = None
 
 
 def input_devices():
-    devices = sd.query_devices()
-    return [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
+    global _device_cache
+    if _device_cache is None:
+        devices = sd.query_devices()
+        _device_cache = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
+    return _device_cache
 
 
 def print_devices() -> None:
@@ -76,8 +69,10 @@ def print_devices() -> None:
 
 
 def device_label(idx: int) -> str:
-    d = sd.query_devices(idx)
-    return f"[{idx}] {d['name']}"
+    for i, d in input_devices():
+        if i == idx:
+            return f"[{idx}] {d['name']}"
+    return f"[{idx}]"
 
 
 def resolve_device(spec: str | None, *, kind: str) -> int | None:
@@ -94,10 +89,10 @@ def resolve_device(spec: str | None, *, kind: str) -> int | None:
 
     if spec.isdigit():
         idx = int(spec)
-        info = sd.query_devices(idx)
-        if info["max_input_channels"] < 1:
-            raise SystemExit(f"{kind} device [{idx}] {info['name']} has no inputs.")
-        return idx
+        for i, d in devices:
+            if i == idx:
+                return idx
+        raise SystemExit(f"{kind} device [{idx}] has no inputs.")
 
     needle = spec.lower()
     matches = [(i, d) for i, d in devices if needle in d["name"].lower()]
@@ -139,11 +134,19 @@ def make_callback(q: queue.Queue):
     return callback
 
 
+def is_ext_label(label: str) -> bool:
+    return label == "EXT" or label.startswith("EXT-")
+
+
+def is_mic_label(label: str) -> bool:
+    return label == "MIC" or label.startswith("MIC-")
+
+
 def emit(log_file, label: str, text: str) -> str:
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [{label}] {text}\n"
     shown = f"[{ts}] [{label}] {text}"
-    if label == "EXT":
+    if is_ext_label(label):
         shown = paint(shown, CYAN)
     else:
         shown = paint(shown, DIM)
@@ -157,12 +160,11 @@ def _norm_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
-def is_speaker_echo(mic_text: str, recent_ext: deque) -> bool:
+def is_speaker_echo(mic_n: str, recent_ext: deque) -> bool:
     """True when the webcam heard Zoom playing through speakers (same words as EXT)."""
     now = time.time()
     while recent_ext and now - recent_ext[0][0] > ECHO_WINDOW_SEC:
         recent_ext.popleft()
-    mic_n = _norm_text(mic_text)
     if not mic_n:
         return True
     mic_tok = set(mic_n.split())
@@ -171,34 +173,29 @@ def is_speaker_echo(mic_text: str, recent_ext: deque) -> bool:
             continue
         if mic_n == ext_n or mic_n in ext_n or ext_n in mic_n:
             return True
-        if SequenceMatcher(None, mic_n, ext_n).ratio() >= ECHO_RATIO:
-            return True
         ext_tok = set(ext_n.split())
-        if mic_tok and ext_tok and len(mic_tok & ext_tok) / min(len(mic_tok), len(ext_tok)) >= 0.7:
+        if not mic_tok or not ext_tok:
+            continue
+        if len(mic_tok & ext_tok) / min(len(mic_tok), len(ext_tok)) >= 0.7:
+            return True
+        if SequenceMatcher(None, mic_n, ext_n).ratio() >= ECHO_RATIO:
             return True
     return False
 
 
-def drain_and_transcribe(q, buf, model):
+def drain_queue(q: queue.Queue) -> np.ndarray | None:
     chunks = []
     while True:
         try:
             chunks.append(q.get_nowait())
         except queue.Empty:
             break
-    if chunks:
-        buf = np.concatenate([buf, *chunks], axis=0)
-
-    texts = []
-    block = SAMPLE_RATE * BLOCK_SEC
-    while buf.shape[0] >= block:
-        audio = buf[:block, 0].astype(np.float32, copy=False)
-        buf = buf[block:]
-        for seg in model.transcribe(audio):
-            text = english_only(seg.text.strip())
-            if text and not is_junk_line(text):
-                texts.append(text)
-    return buf, texts
+    if not chunks:
+        return None
+    audio = np.concatenate(chunks, axis=0)
+    if audio.ndim > 1:
+        return audio[:, 0].astype(np.float32, copy=False)
+    return audio.astype(np.float32, copy=False)
 
 
 def make_extractor(transcribe_path: str) -> QuestionExtractor:
@@ -252,6 +249,11 @@ def main():
     if ext_idx is not None:
         sources.append(("EXT", ext_idx))
 
+    track = tracking_enabled()
+    vad_path, emb_path = ensure_models(app_dir / "models", need_embedding=track)
+    vads = {label: SpeechVad(vad_path) for label, _ in sources}
+    tracker = OnlineSpeakerTracker(emb_path) if track and emb_path is not None else None
+
     model_name = resolve_model_name()
     log_dir = os.environ.get("TRANSCRIBE_LOG_DIR", str(app_dir / "log"))
     os.makedirs(log_dir, exist_ok=True)
@@ -260,34 +262,26 @@ def main():
     extractor = make_extractor(log_filename)
 
     logging.getLogger("pywhispercpp").setLevel(logging.ERROR)
-    from pywhispercpp.model import Model
+    print(f"Loading Whisper {model_name} (metal greedy) ...", flush=True)
+    worker = SttWorker(Transcriber(model_name), tracker)
 
-    model = Model(
-        model_name,
-        params_sampling_strategy=1,  # beam search
-        language="en",
-        print_progress=False,
-        print_realtime=False,
-        print_special=False,
-        suppress_nst=True,
-        n_threads=os.cpu_count() or 4,
-        beam_search={"beam_size": 5, "patience": 1.0},
-        context_params={"use_gpu": True},
-        redirect_whispercpp_logs_to=None,
+    print(
+        f"Listening  mic={device_label(mic_idx)}"
+        + (f"  ext={device_label(ext_idx)}" if ext_idx is not None else "  ext=none")
+        + (f"  speakers={'on' if tracker else 'off'}")
+        + f"  stt={model_name}/metal",
+        flush=True,
     )
-
-    print(f"Listening  mic={device_label(mic_idx)}"
-          + (f"  ext={device_label(ext_idx)}" if ext_idx is not None else "  ext=none"),
-          flush=True)
     print(f"log   {log_filename}", flush=True)
     print(paint(f"qlog  {extractor.out_path}", YELLOW), flush=True)
 
     # EXT first so MIC can drop speaker-echo duplicates
     sources.sort(key=lambda item: 0 if item[0] == "EXT" else 1)
     queues = {label: queue.Queue() for label, _ in sources}
-    bufs = {label: np.zeros((0, 1), dtype=np.float32) for label, _ in sources}
     recent_ext: deque = deque()
+    last_said: dict[str, tuple[float, str]] = {}
     extractor.start()
+    worker.start()
 
     with open(log_filename, "a", encoding="utf-8") as log_file, ExitStack() as stack:
         for label, idx in sources:
@@ -299,27 +293,41 @@ def main():
                     callback=make_callback(queues[label]),
                 )
             )
+
+        def handle_texts(out_label: str, texts: list[str]) -> None:
+            for text in texts:
+                norm = _norm_text(text)
+                prev = last_said.get(out_label)
+                if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or norm in prev[1] or prev[1] in norm):
+                    continue
+                last_said[out_label] = (time.time(), norm)
+                if is_ext_label(out_label):
+                    recent_ext.append((time.time(), norm))
+                elif is_mic_label(out_label) and recent_ext and is_speaker_echo(norm, recent_ext):
+                    continue
+                ts = emit(log_file, out_label, text)
+                if is_ext_label(out_label) or is_sure_question(text):
+                    extractor.add_ext(ts, text)
+
         try:
             while True:
                 progressed = False
-                for label, _ in sources:
-                    before = bufs[label].shape[0]
-                    bufs[label], texts = drain_and_transcribe(queues[label], bufs[label], model)
-                    if bufs[label].shape[0] != before:
-                        progressed = True
-                    for text in texts:
-                        if label == "EXT":
-                            recent_ext.append((time.time(), _norm_text(text)))
-                        elif label == "MIC" and recent_ext and is_speaker_echo(text, recent_ext):
-                            continue
-                        ts = emit(log_file, label, text)
-                        if label == "EXT":
-                            extractor.add_ext(ts, text)
+                for src_label, _ in sources:
+                    audio = drain_queue(queues[src_label])
+                    if audio is None:
+                        continue
+                    progressed = True
+                    for seg in vads[src_label].accept(audio):
+                        worker.submit(src_label, seg)
+                for out_label, texts in worker.drain():
+                    progressed = True
+                    handle_texts(out_label, texts)
                 if not progressed:
-                    time.sleep(0.05)
+                    time.sleep(0.02)
         except KeyboardInterrupt:
             print("\nStopped.", flush=True)
         finally:
+            worker.close()
             extractor.close()
 
 

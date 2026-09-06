@@ -1,10 +1,16 @@
-# Whisper model size: medium | large
+# Whisper model size: medium | large  (Metal greedy decode; medium is the live default)
 WHISPER_MODEL=medium
 
 # Audio devices: index or name substring. Empty = default mic / auto-detect loopback.
 # List devices:  python main.py --list-devices
 AUDIO_DEVICE=C270
 EXTERNAL_AUDIO_DEVICE=BlackHole
+
+# Online speaker tracking (sherpa-onnx embeddings). 0 = keep plain [MIC]/[EXT].
+# MIC-0 = webcam speaker 0, MIC-1 = webcam speaker 1. Same for EXT on Zoom.
+SPEAKER_TRACKING=1
+SPEAKER_THRESHOLD=0.50
+SPEAKER_MAX=4
 
 # Bedrock Function URL (OpenAI-compatible /v1/chat/completions)
 # https://github.com/taixingbi/bedrock-tenants

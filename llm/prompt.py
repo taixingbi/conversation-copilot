@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-QA_INSTRUCTIONS = (
-    "You are helping a candidate in a live job interview.\n"
-    "The interviewer speech is noisy ASR, split across several lines.\n"
-    "Reconstruct the complete question they asked, in clear English.\n"
-    "Write the question they actually asked. Do not invent a different question.\n"
-    "SKIP only if the lines are not a complete question (greeting, fragment, or noise).\n"
-    "A complete question like 'What is Java?' must get Q and A, not SKIP.\n"
-    "Then answer in 1 or 2 short sentences with very simple words.\n"
-    "Q: <reconstructed question>\n"
-    "A: <1-2 simple sentences>"
-)
+import json
+from pathlib import Path
+
+_PATH = Path(__file__).resolve().parent.parent / "prompt" / "qa_instructions.json"
+
+
+def _load() -> dict:
+    return json.loads(_PATH.read_text(encoding="utf-8"))
+
+
+def _build(focus: str) -> str:
+    return _load()["base"].replace("{focus}", focus)
+
+
+def _instructions_for(ext_lines: list[str]) -> str:
+    data = _load()
+    blob = " ".join(ext_lines).lower()
+    keys = [k for k in data.get("keywords", {}) if k in blob]
+    focus = data["keywords"][max(keys, key=len)] if keys else data["default"]
+    return _build(focus)
 
 
 def qa_prompt(ext_lines: list[str]) -> str:
     lines = "\n".join(f"- {line}" for line in ext_lines if line.strip())
-    return f"{QA_INSTRUCTIONS}\n\nInterviewer lines:\n{lines or '(none)'}\n"
+    return f"{_instructions_for(ext_lines)}\n\nInterviewer lines:\n{lines or '(none)'}\n"

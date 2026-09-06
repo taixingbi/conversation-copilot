@@ -110,7 +110,7 @@ class QuestionExtractor:
         self.max_interval_sec = max_interval_sec
         self._pending: list[str] = []
         self._history: deque = deque(maxlen=EXT_WINDOW)
-        self._known: list[str] = []
+        self._known: deque = deque(maxlen=40)
         self._lock = threading.Lock()
         self._last_ext = 0.0
         self._last_call = 0.0
@@ -151,7 +151,7 @@ class QuestionExtractor:
         with self._lock:
             if self._already(question):
                 return
-            self._known.append(question)
+            self._known.append(question)  # maxlen drops oldest
         ts = time.strftime("%H:%M:%S")
         answer = short_answer(answer)
         block = f"[{ts}] Q: {question}\nA: {answer}\n\n"
