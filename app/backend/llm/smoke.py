@@ -56,7 +56,7 @@ def main() -> None:
     load_dotenv(ROOT / ".env")
     load_dotenv(ROOT.parent / ".env")
     url = (os.environ.get("FUNCTION_URL") or "").strip()
-    key = (os.environ.get("INFERENCE_API_KEY") or os.environ.get("API_KEY") or "1234").strip()
+    key = (os.environ.get("INFERENCE_API_KEY") or "").strip() or "1234"
     model = (args.model or os.environ.get("LLM_MODEL") or "nova-pro").strip()
 
     q, a = parse_qa(

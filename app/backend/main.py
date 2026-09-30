@@ -207,7 +207,7 @@ def drain_queue(q: queue.Queue) -> np.ndarray | None:
 
 def make_extractor(transcribe_path: str, metrics: LatencyTracker, app_dir: Path) -> QuestionExtractor:
     url = (os.environ.get("FUNCTION_URL") or "").strip()
-    key = (os.environ.get("INFERENCE_API_KEY") or os.environ.get("API_KEY") or "1234").strip()
+    key = (os.environ.get("INFERENCE_API_KEY") or "").strip() or "1234"
     model = (os.environ.get("LLM_MODEL") or "nova-pro").strip()
     fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
     path = questions_path_for(transcribe_path)
