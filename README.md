@@ -33,7 +33,7 @@ answers.
 ## Model inference
 
 The app sends chat requests to `FUNCTION_URL/v1/chat/completions`. Set these
-values in the project root `.env` (see `app/env_example`):
+values in the project root `.env` (see `.env.example`):
 
 ```dotenv
 FUNCTION_URL=https://gwjg7secnplcnrbdxrb52ijbge0dwwnu.lambda-url.us-east-1.on.aws/
