@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import queue
 import threading
 import time
@@ -31,6 +32,27 @@ MODEL_ALIASES = {
 DISTIL = {v for k, v in MODEL_ALIASES.items() if "distil" in k}
 MIN_SAMPLES = 1600  # 0.1s
 RMS_MIN = 0.003
+logger = logging.getLogger(__name__)
+
+
+class CheckedFeatureExtractor:
+    """Contain NumPy floating-point flags and validate Whisper's features."""
+
+    def __init__(self, extractor):
+        self.extractor = extractor
+
+    def __getattr__(self, name):
+        return getattr(self.extractor, name)
+
+    def __call__(self, *args, **kwargs):
+        # NumPy's macOS matmul can report divide/overflow/invalid flags even
+        # when its result agrees with a direct, finite calculation. Limit the
+        # workaround to extraction and reject genuinely invalid features.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            features = self.extractor(*args, **kwargs)
+        if not np.isfinite(features).all():
+            raise ValueError("Whisper feature extraction produced non-finite values")
+        return features
 
 
 def resolve_model_name(raw: str | None = None) -> str:
@@ -61,7 +83,18 @@ def resolve_backend(model_name: str | None = None) -> str:
 
 
 def usable_audio(audio: np.ndarray) -> np.ndarray | None:
-    samples = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
+    samples = np.asarray(audio)
+    if samples.ndim not in (1, 2) or (samples.ndim == 2 and samples.shape[1] == 0):
+        return None
+    if not np.isfinite(samples).all():
+        return None
+    # Capture supplies normalized floating-point PCM. Reject corrupt finite
+    # values before squaring; flattening stereo would also change its timing.
+    if samples.size and (samples.min() < -1.0 or samples.max() > 1.0):
+        return None
+    if samples.ndim == 2:
+        samples = samples.mean(axis=1, dtype=np.float32)
+    samples = np.ascontiguousarray(samples, dtype=np.float32)
     if samples.size < MIN_SAMPLES:
         return None
     if not np.isfinite(samples).all():
@@ -107,7 +140,17 @@ class Transcriber:
             ) from exc
         device = (os.environ.get("WHISPER_DEVICE") or "cpu").strip() or "cpu"
         compute = (os.environ.get("WHISPER_COMPUTE") or "int8").strip() or "int8"
-        return WhisperModel(self.model_name, device=device, compute_type=compute)
+        model = WhisperModel(self.model_name, device=device, compute_type=compute)
+        model.feature_extractor = CheckedFeatureExtractor(model.feature_extractor)
+        return model
+
+    def warmup(self) -> None:
+        """Run inference before advertising readiness; discard its output."""
+        samples = np.zeros(16000, dtype=np.float32)
+        if self.backend == "faster":
+            self._transcribe_faster(samples)
+        else:
+            self._transcribe_metal(samples)
 
     def transcribe(self, audio: np.ndarray) -> list[str]:
         samples = usable_audio(audio)
@@ -192,7 +235,7 @@ class SttWorker:
         samples = usable_audio(audio)
         if samples is None:
             return
-        job = (prefix, samples, t_end if t_end is not None else time.monotonic())
+        job = (prefix, samples.copy(), t_end if t_end is not None else time.monotonic())
         try:
             self.jobs.put_nowait(job)
         except queue.Full:
@@ -225,10 +268,20 @@ class SttWorker:
                 prefix, audio, t_end = self.jobs.get(timeout=0.05)
             except queue.Empty:
                 continue
-            label = self.tracker.assign(audio, prefix=prefix) if self.tracker else prefix
+            label = prefix
+            if self.tracker:
+                try:
+                    label = self.tracker.assign(audio, prefix=prefix)
+                except Exception:
+                    logger.exception("Speaker tracking failed for %s; keeping source label", prefix)
             t0 = time.perf_counter()
             with self._stt_lock:
                 stt = self.stt
-            texts = stt.transcribe(audio)
+            try:
+                texts = stt.transcribe(audio)
+            except Exception as exc:
+                logger.exception("Transcription failed for %s", prefix)
+                self.results.put((label, [], {"error": str(exc), "seg_end": t_end}))
+                continue
             stt_ms = (time.perf_counter() - t0) * 1000
             self.results.put((label, texts, {"stt_ms": stt_ms, "seg_end": t_end}))

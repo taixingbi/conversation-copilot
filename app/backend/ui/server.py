@@ -76,7 +76,7 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
     while len(buf) < n:
         try:
             chunk = sock.recv(n - len(buf))
-        except TimeoutError:
+        except (socket.timeout, TimeoutError):
             raise
         except OSError:
             return None
@@ -147,6 +147,12 @@ class OverlayServer:
                         return
                     self._json(runtime.snapshot())
                     return
+                if self.path.rstrip("/") == "/api/chat":
+                    if runtime is None:
+                        self._json({"error": "runtime unavailable"}, 503)
+                        return
+                    self._json({"messages": runtime.chat_history()})
+                    return
                 if self.path.rstrip("/") == "/ws":
                     self._ws()
                     return
@@ -161,6 +167,17 @@ class OverlayServer:
                     body = self._read_json()
                 except json.JSONDecodeError:
                     self._json({"error": "invalid json"}, 400)
+                    return
+                if path == "/api/chat":
+                    try:
+                        result = runtime.ask_chat(body.get("question") if isinstance(body, dict) else None)
+                    except ValueError as exc:
+                        self._json({"error": str(exc)}, 400)
+                        return
+                    except Exception as exc:
+                        self._json({"error": f"Chat failed: {exc}"}, 502)
+                        return
+                    self._json(result)
                     return
                 if path == "/api/config":
                     try:
@@ -177,6 +194,8 @@ class OverlayServer:
                             kwargs["summary_model"] = body.get("summary_model")
                         if "summary_prompt" in body:
                             kwargs["summary_prompt"] = body.get("summary_prompt") or ""
+                        if "chat_prompt" in body:
+                            kwargs["chat_prompt"] = body.get("chat_prompt") or ""
                         if "recognition_confidence" in body:
                             kwargs["recognition_confidence"] = body.get("recognition_confidence")
                         snap = runtime.apply(**kwargs)
@@ -240,7 +259,7 @@ class OverlayServer:
                         try:
                             if _ws_read(sock) is None:
                                 break
-                        except TimeoutError:
+                        except (socket.timeout, TimeoutError):
                             continue
                         except OSError:
                             break

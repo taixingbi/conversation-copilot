@@ -8,5 +8,4 @@ contextBridge.exposeInMainWorld("copilot", {
   onFullscreen: (cb) => {
     ipcRenderer.on("copilot-fullscreen", (_e, on) => cb(!!on));
   },
-  sidebar: (on) => ipcRenderer.send("copilot-sidebar", !!on),
 });

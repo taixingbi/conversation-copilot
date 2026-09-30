@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterator
 
 from llm.client import ChatClient, strip_think
-from llm.prompt import gate_prompt, qa_prompt
+from llm.prompt import qa_prompt, duplicate_question_prompt
 
 _Q = re.compile(r"^Q:\s*", re.I)
 _A = re.compile(r"^A:\s*", re.I)
@@ -73,6 +73,7 @@ class LlmAnswerer:
         self.client = ChatClient(function_url, api_key, model)
         self.model = model
         self.fast_model = (fast_model or "").strip() or model
+        self.answered_questions: list[str] = []
         self.memory = memory
         self.profile = profile
 
@@ -103,46 +104,43 @@ class LlmAnswerer:
             background = "\n\n".join(hits)
         return history, background
 
-    def should_answer(self, ext_lines: list[str]) -> bool:
-        raw = self.client.chat(
-            gate_prompt(ext_lines),
-            max_tokens=6,
-            model=self.fast_model,
-        )
-        return (raw or "").strip().upper().startswith("YES")
-
     def qa_from_ext(self, ext_lines: list[str], *, kind: str = "final") -> tuple[str, str]:
         prompt_kind = KIND_PROMPT.get(kind, "base")
         max_tokens = KIND_TOKENS.get(kind, 220)
-        max_sent = 1 if kind in {"draft", "fast"} else 4
         history, background = self._context(ext_lines)
         content = self.client.chat(
-            qa_prompt(ext_lines, kind=prompt_kind, history=history, background=background),
+            qa_prompt(ext_lines, kind=prompt_kind, history=history, background=background, answered_questions=self.answered_questions),
             max_tokens=max_tokens,
             model=self._model_for(kind),
         )
-        return parse_qa(content, max_sentences=max_sent)
+        question, answer = parse_qa(content, max_sentences=0)
+        if question and answer and self._is_duplicate(question):
+            return "", ""
+        return question, answer
+
+    def _is_duplicate(self, question: str) -> bool:
+        if not self.answered_questions:
+            return False
+        decision = self.client.chat(
+            duplicate_question_prompt(question, self.answered_questions),
+            max_tokens=32,
+            model=self.model,
+        ).strip().upper().rstrip(".")
+        verdict = re.match(r"^\W*(DUPLICATE|NEW)\b", decision)
+        if verdict is None:
+            raise RuntimeError("Could not validate whether the question was already answered")
+        return verdict.group(1) == "DUPLICATE"
 
     def iter_qa(self, ext_lines: list[str], *, kind: str = "final") -> Iterator[tuple[str, str]]:
-        """Yield (question, answer_so_far) as tokens arrive. Last yield is cleaned."""
+        """Validate the spoken question and buffer the result before displaying it."""
         prompt_kind = KIND_PROMPT.get(kind, "base")
         max_tokens = KIND_TOKENS.get(kind, 220)
-        max_sent = 1 if kind in {"draft", "fast"} else 4
         history, background = self._context(ext_lines)
-        buf = ""
-        last: tuple[str, str] = ("", "")
-        for delta in self.client.chat_stream(
-            qa_prompt(ext_lines, kind=prompt_kind, history=history, background=background),
+        content = "".join(self.client.chat_stream(
+            qa_prompt(ext_lines, kind=prompt_kind, history=history, background=background, answered_questions=self.answered_questions),
             max_tokens=max_tokens,
             model=self._model_for(kind),
-        ):
-            if not delta:
-                continue
-            buf += delta
-            parsed = parse_qa_partial(buf)
-            if parsed != last and (parsed[0] or parsed[1]):
-                last = parsed
-                yield parsed
-        final = parse_qa(buf, max_sentences=max_sent)
-        if final != last:
-            yield final
+        ))
+        question, answer = parse_qa(content, max_sentences=0)
+        if question and answer and not self._is_duplicate(question):
+            yield question, answer

@@ -66,7 +66,7 @@ function spawnBackend(url) {
     const root = __dirname;
     const py = path.join(root, "venv", "bin", process.platform === "win32" ? "python.exe" : "python");
     const exe = fs.existsSync(py) ? py : "python3";
-    backend = spawn(exe, [path.join(root, "main.py"), "--no-overlay"], { env, cwd: root });
+    backend = spawn(exe, [path.join(root, "backend", "main.py"), "--no-overlay"], { env, cwd: root });
   }
   backend.stdout?.on("data", (buf) => process.stdout.write(buf));
   backend.stderr?.on("data", (buf) => process.stderr.write(buf));
@@ -76,21 +76,21 @@ function spawnBackend(url) {
 }
 
 function createWindow(url) {
-  const area = screen.getPrimaryDisplay().workAreaSize;
-  const width = 420;
-  const height = 640;
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(800, area.width);
+  const height = Math.min(340, area.height);
   const win = new BrowserWindow({
     width,
     height,
-    x: Math.max(0, area.width - width - 18),
-    y: 18,
-    transparent: true,
+    x: area.x + Math.round((area.width - width) / 2),
+    y: area.y + Math.max(0, area.height - height - 18),
+    transparent: false,
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: true,
     hasShadow: true,
-    backgroundColor: "#00000000",
+    backgroundColor: "#f6f6f7",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -140,28 +140,7 @@ app.whenReady().then(async () => {
     console.error(err.message);
   }
   createWindow(url);
-  console.log("window open — look at the top-right of the screen (no dock icon)");
-});
-
-let sidebarBounds = null;
-
-ipcMain.on("copilot-sidebar", (e, on) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || win.isDestroyed() || win.isFullScreen()) return;
-  const extra = 280;
-  if (on) {
-    const cur = win.getBounds();
-    if (!sidebarBounds) sidebarBounds = { ...cur };
-    const area = screen.getPrimaryDisplay().workArea;
-    const width = Math.min(sidebarBounds.width + extra, area.width);
-    const x = Math.max(area.x, sidebarBounds.x + sidebarBounds.width - width);
-    win.setBounds({ x, y: sidebarBounds.y, width, height: sidebarBounds.height });
-    return;
-  }
-  if (sidebarBounds) {
-    win.setBounds(sidebarBounds);
-    sidebarBounds = null;
-  }
+  console.log("window open — look at the bottom center of the screen (no dock icon)");
 });
 
 ipcMain.on("copilot-quit", () => app.quit());

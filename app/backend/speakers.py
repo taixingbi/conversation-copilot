@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,8 @@ class SpeechVad:
         chunk_sec = float(os.environ.get("STT_CHUNK_SEC", str(STREAM_CHUNK_SEC)))
         self.chunk_samples = int(chunk_sec * sample_rate) if chunk_sec > 0 else 0
         self._emitted = 0
+        # Preserve the onset while Silero waits to confirm speech.
+        self._preroll = deque(maxlen=max(1, int(0.3 * sample_rate / self.window_size)))
 
     def _take(self, n: int | None = None) -> np.ndarray:
         blob = np.concatenate(self._parts) if self._parts else np.zeros((0,), dtype=np.float32)
@@ -100,13 +103,17 @@ class SpeechVad:
         i = 0
         n = chunk.size
         w = self.window_size
-        while i + w < n:
+        while i + w <= n:
             win = chunk[i : i + w]
             i += w
             self.vad.accept_waveform(win)
             while not self.vad.empty():
                 self.vad.pop()
             if self.vad.is_speech_detected():
+                if not self._parts and self._preroll:
+                    self._parts.extend(self._preroll)
+                    self._n += sum(part.size for part in self._preroll)
+                    self._preroll.clear()
                 self._parts.append(win)
                 self._n += win.size
                 if self.chunk_samples > 0:
@@ -121,12 +128,13 @@ class SpeechVad:
                     while self._n >= self.max_samples:
                         segs.append(self._take(self.max_samples))
             else:
-                if self._n >= self.min_samples:
+                if self._n >= self.min_samples and self._n > self._emitted:
                     segs.append(self._take())
                 else:
                     self._parts = []
                     self._n = 0
                 self._emitted = 0
+                self._preroll.append(win.copy())
         self.buf = chunk[i:]
         return segs
 
@@ -135,7 +143,7 @@ class SpeechVad:
             self.vad.flush()
         while not self.vad.empty():
             self.vad.pop()
-        if self._n >= self.min_samples:
+        if self._n >= self.min_samples and self._n > self._emitted:
             segs = [self._take()]
             self._emitted = 0
             return segs
@@ -242,7 +250,7 @@ class OnlineSpeakerTracker:
         else:
             name = best or last or fallback
 
-        if score >= self.threshold:
+        if name == best and score >= self.threshold:
             n = self.counts.get(name, 1)
             self.centroids[name] = _normalize(self.centroids[name] * n + emb)
             self.counts[name] = n + 1

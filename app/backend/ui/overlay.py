@@ -7,8 +7,8 @@ import sys
 def main() -> None:
     p = argparse.ArgumentParser(description="Mac overlay window hidden from screen share")
     p.add_argument("--url", required=True, help="http://127.0.0.1:8765/")
-    p.add_argument("--width", type=int, default=420)
-    p.add_argument("--height", type=int, default=640)
+    p.add_argument("--width", type=int, default=800)
+    p.add_argument("--height", type=int, default=340)
     args = p.parse_args()
 
     try:
@@ -46,8 +46,10 @@ def main() -> None:
     app.setDelegate_(delegate)
 
     screen = NSScreen.mainScreen().visibleFrame()
-    x = screen.origin.x + screen.size.width - args.width - 18
-    y = screen.origin.y + screen.size.height - args.height - 18
+    width = min(args.width, screen.size.width)
+    height = min(args.height, screen.size.height)
+    x = screen.origin.x + (screen.size.width - width) / 2
+    y = screen.origin.y + min(18, screen.size.height - height)
     style = (
         NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
@@ -55,7 +57,7 @@ def main() -> None:
         | NSWindowStyleMaskFullSizeContentView
     )
     win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        NSMakeRect(x, y, args.width, args.height), style, 2, False
+        NSMakeRect(x, y, width, height), style, 2, False
     )
     win.setTitle_("Copilot")
     win.setTitlebarAppearsTransparent_(True)

@@ -144,12 +144,14 @@ class ChatClient:
                 if got or cancel.is_set():
                     return
             except Exception:
-                if got or cancel.is_set():
+                if cancel.is_set():
                     return
+                if got:
+                    raise
             if cancel.is_set():
                 return
             text = self.chat(prompt, max_tokens=max_tokens, model=used)
-            if text:
+            if text and not cancel.is_set():
                 yield text
         finally:
             with self._lock:

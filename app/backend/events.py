@@ -19,6 +19,7 @@ class EventBus:
         self._subs: list[queue.Queue] = []
         self._keep = keep
         self._recent: deque = deque(maxlen=keep)
+        self._readiness: dict | None = None
 
     def publish(self, typ: str, **payload) -> dict:
         ev = {"type": typ, "t": time.time(), **payload}
@@ -35,7 +36,10 @@ class EventBus:
             elif typ == "summary":
                 kept = [e for e in self._recent if e.get("type") != "summary"]
                 self._recent = deque(kept, maxlen=self._keep)
-            self._recent.append(ev)
+            if typ == "readiness":
+                self._readiness = ev
+            else:
+                self._recent.append(ev)
             subs = list(self._subs)
         for q in subs:
             try:
@@ -59,6 +63,10 @@ class EventBus:
                     q.put_nowait(ev)
                 except queue.Full:
                     break
+            if self._readiness is not None:
+                if q.full():
+                    q.get_nowait()
+                q.put_nowait(self._readiness)
             self._subs.append(q)
         return q
 

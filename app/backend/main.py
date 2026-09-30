@@ -5,9 +5,11 @@ import logging
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import time
+import threading
 import warnings
 from collections import deque
 from contextlib import ExitStack
@@ -27,7 +29,6 @@ from questions import (
     DIM,
     YELLOW,
     QuestionExtractor,
-    is_sure_question,
     paint,
     questions_path_for,
     safe_print,
@@ -132,11 +133,13 @@ def auto_external_index(mic_idx: int) -> int | None:
     return None
 
 
-def make_callback(q: queue.Queue):
+def make_callback(q: queue.Queue, received: threading.Event | None = None):
     def callback(indata, frames, t, status):
         if status:
             pass
         q.put(indata.copy())
+        if received is not None and frames and not status:
+            received.set()
 
     return callback
 
@@ -152,9 +155,8 @@ def is_mic_label(label: str) -> bool:
 def emit(log_file, label: str, text: str) -> str:
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [{label}] {text}\n"
-    shown = f"[{ts}] [{label}] {text}"
-    style = CYAN if is_ext_label(label) else DIM
-    safe_print(shown, style)
+    meta = paint(f"{ts}  {label:<6}", CYAN if is_ext_label(label) else DIM)
+    safe_print(f"{meta}  {text}")
     log_file.write(line)
     log_file.flush()
     BUS.publish("transcript", ts=ts, label=label, text=text)
@@ -206,7 +208,7 @@ def drain_queue(q: queue.Queue) -> np.ndarray | None:
 def make_extractor(transcribe_path: str, metrics: LatencyTracker, app_dir: Path) -> QuestionExtractor:
     url = (os.environ.get("FUNCTION_URL") or "").strip()
     key = (os.environ.get("INFERENCE_API_KEY") or os.environ.get("API_KEY") or "1234").strip()
-    model = (os.environ.get("LLM_MODEL") or "qwen3-next-80b-a3b").strip()
+    model = (os.environ.get("LLM_MODEL") or "nova-pro").strip()
     fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
     path = questions_path_for(transcribe_path)
     n = int(os.environ.get("QA_HISTORY") or "6")
@@ -257,12 +259,42 @@ def _launch_overlay_window(app_dir: Path, url: str) -> subprocess.Popen | None:
     if not electron.is_file():
         electron = app_dir / "overlay" / "node_modules" / ".bin" / "electron"
     if electron.is_file():
-        return subprocess.Popen([str(electron), str(app_dir), url], cwd=str(app_dir))
+        env = os.environ.copy()
+        env.pop("ELECTRON_RUN_AS_NODE", None)
+        return subprocess.Popen(
+            [str(electron), str(app_dir), url], cwd=str(app_dir), env=env,
+            start_new_session=(os.name == "posix"),
+        )
     if sys.platform == "darwin":
-        script = app_dir / "ui" / "overlay.py"
-        return subprocess.Popen([sys.executable, str(script), "--url", url])
+        script = Path(__file__).resolve().parent / "ui" / "overlay.py"
+        return subprocess.Popen(
+            [sys.executable, str(script), "--url", url], start_new_session=True,
+        )
     print("overlay window skipped — run:  npm install && npm start", flush=True)
     return None
+
+
+def close_overlay(proc) -> None:
+    """Stop the owned launcher and its Electron children together."""
+    if proc is None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        elif proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=2)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            proc.kill()
+        proc.wait(timeout=2)
 
 
 def parse_args():
@@ -285,13 +317,16 @@ def main():
         app_dir = Path(sys.executable).resolve().parent
         bundle = Path(getattr(sys, "_MEIPASS", app_dir))
     else:
-        app_dir = Path(__file__).resolve().parent
+        app_dir = Path(__file__).resolve().parent.parent
         bundle = app_dir
     store = data_dir(app_dir)
+    env_path = resolve_env_path(store, app_dir) if getattr(sys, "frozen", False) else app_dir.parent / ".env"
+    load_dotenv(env_path)
     load_dotenv(store / ".env")
     load_dotenv(app_dir / ".env")
     load_dotenv(bundle / ".env")
-    runtime = Runtime(resolve_env_path(store, app_dir))
+    prompt_dir = store / "prompt" if getattr(sys, "frozen", False) else app_dir.parent / "prompt"
+    runtime = Runtime(env_path, prompt_dir=prompt_dir)
 
     if args.list_devices:
         print_devices()
@@ -355,76 +390,100 @@ def main():
 
     runtime.extractor = extractor
     runtime.worker = worker
-    overlay, overlay_proc = start_overlay(app_dir, args, runtime)
+    overlay = overlay_proc = None
+    with ExitStack() as cleanup:
+        cleanup.callback(extractor.close)
+        cleanup.callback(worker.close)
+        def stop_ui():
+            BUS.publish("readiness", ready=False, text="Stopped")
+            try:
+                close_overlay(overlay_proc)
+            finally:
+                if overlay:
+                    overlay.close()
+        cleanup.callback(stop_ui)
+        overlay, overlay_proc = start_overlay(app_dir, args, runtime)
+        BUS.publish("readiness", ready=False, text="Warming up recognition…")
+        worker.stt.warmup()
 
-    # EXT first so MIC can drop speaker-echo duplicates
-    sources.sort(key=lambda item: 0 if item[0] == "EXT" else 1)
-    queues = {label: queue.Queue() for label, _ in sources}
-    recent_ext: deque = deque()
-    last_said: dict[str, tuple[float, str]] = {}
-    extractor.start()
-    worker.start()
+        # EXT first so MIC can drop speaker-echo duplicates
+        sources.sort(key=lambda item: 0 if item[0] == "EXT" else 1)
+        queues = {label: queue.Queue() for label, _ in sources}
+        received = {label: threading.Event() for label, _ in sources}
+        recent_ext: deque = deque()
+        last_said: dict[str, tuple[float, str]] = {}
+        extractor.start()
+        worker.start()
 
-    with open(log_filename, "a", encoding="utf-8") as log_file, ExitStack() as stack:
-        for label, idx in sources:
-            stack.enter_context(
-                sd.InputStream(
-                    device=idx,
-                    channels=1,
-                    samplerate=SAMPLE_RATE,
-                    callback=make_callback(queues[label]),
+        with open(log_filename, "a", encoding="utf-8") as log_file, ExitStack() as stack:
+            for label, idx in sources:
+                stack.enter_context(
+                    sd.InputStream(
+                        device=idx,
+                        channels=1,
+                        dtype="float32",
+                        samplerate=SAMPLE_RATE,
+                        callback=make_callback(queues[label], received[label]),
+                    )
                 )
-            )
 
-        def handle_texts(out_label: str, texts: list[str], info: dict | None = None) -> None:
-            info = info or {}
-            if info.get("stt_ms"):
-                metrics.observe("stt_ms", float(info["stt_ms"]))
-            for text in texts:
-                norm = _norm_text(text)
-                prev = last_said.get(out_label)
-                if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or (norm and norm in prev[1])):
-                    continue
-                last_said[out_label] = (time.time(), norm)
-                if is_ext_label(out_label):
-                    recent_ext.append((time.time(), norm))
-                elif is_mic_label(out_label) and recent_ext and is_speaker_echo(norm, recent_ext):
-                    continue
-                ts = emit(log_file, out_label, text)
-                if is_ext_label(out_label) or is_sure_question(text):
+            BUS.publish("readiness", ready=False, text="Waiting for audio…")
+            ready = False
+
+            def handle_texts(out_label: str, texts: list[str], info: dict | None = None) -> None:
+                info = info or {}
+                if info.get("error"):
+                    BUS.publish("status", text=f"Recognition failed: {info['error']}")
+                if info.get("stt_ms"):
+                    metrics.observe("stt_ms", float(info["stt_ms"]))
+                for text in texts:
+                    norm = _norm_text(text)
+                    prev = last_said.get(out_label)
+                    if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or (norm and norm in prev[1])):
+                        continue
+                    last_said[out_label] = (time.time(), norm)
+                    if is_ext_label(out_label):
+                        recent_ext.append((time.time(), norm))
+                    elif is_mic_label(out_label) and recent_ext and is_speaker_echo(norm, recent_ext):
+                        continue
+                    ts = emit(log_file, out_label, text)
                     extractor.add_ext(
                         ts,
-                        text,
+                        f"[{out_label}] {text}",
                         t_mono=info.get("seg_end"),
                         stt_ms=float(info.get("stt_ms") or 0),
                     )
 
-        try:
-            while True:
-                progressed = False
-                for src_label, _ in sources:
-                    audio = drain_queue(queues[src_label])
-                    if audio is None:
-                        continue
-                    progressed = True
-                    t_end = time.monotonic()
-                    for seg in vads[src_label].accept(audio):
-                        worker.submit(src_label, seg, t_end=t_end)
-                for out_label, texts, info in worker.drain():
-                    progressed = True
-                    handle_texts(out_label, texts, info)
-                if not progressed:
-                    time.sleep(0.02)
-        except KeyboardInterrupt:
-            print("\nStopped.", flush=True)
-        finally:
-            worker.close()
-            extractor.close()
-            if overlay_proc and overlay_proc.poll() is None:
-                overlay_proc.terminate()
-            if overlay:
-                overlay.close()
+            try:
+                while True:
+                    if not ready and all(event.is_set() for event in received.values()):
+                        ready = True
+                        BUS.publish("readiness", ready=True, text="Ready")
+                        print("✓ Ready — listening", flush=True)
+                    progressed = False
+                    for src_label, _ in sources:
+                        audio = drain_queue(queues[src_label])
+                        if audio is None:
+                            continue
+                        progressed = True
+                        t_end = time.monotonic()
+                        for seg in vads[src_label].accept(audio):
+                            worker.submit(src_label, seg, t_end=t_end)
+                    for out_label, texts, info in worker.drain():
+                        progressed = True
+                        handle_texts(out_label, texts, info)
+                    if not progressed:
+                        time.sleep(0.02)
+            except KeyboardInterrupt:
+                print("\nStopped.", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    def stop_script(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_script)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nStopped.", flush=True)

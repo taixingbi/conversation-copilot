@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>conversation-copilot</title>
   <script>
-    document.documentElement.dataset.theme = localStorage.getItem("overlay-theme") === "white" ? "white" : "black";
+    document.documentElement.dataset.theme = localStorage.getItem("overlay-theme") === "black" ? "black" : "white";
   </script>
   <style>
-    :root, [data-theme="black"] {
-      --bg: rgba(28, 28, 30, 0.86);
+    :root { --sidebar-width: 46%; }
+    [data-theme="black"] {
+      --bg: #1c1c1e;
       --line: rgba(255, 255, 255, 0.1);
       --muted: #98989d;
       --text: #f5f5f7;
@@ -28,8 +29,8 @@
       --save-fg: #fff;
       --shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
     }
-    [data-theme="white"] {
-      --bg: rgba(246, 246, 247, 0.92);
+    :root, [data-theme="white"] {
+      --bg: #f6f6f7;
       --line: rgba(0, 0, 0, 0.08);
       --muted: #6e6e73;
       --text: #1d1d1f;
@@ -51,7 +52,7 @@
     html, body {
       margin: 0;
       height: 100%;
-      background: transparent;
+      background: var(--bg);
       color: var(--text);
       font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
       overflow: hidden;
@@ -67,8 +68,6 @@
       background: var(--bg);
       border: 1px solid var(--line);
       border-radius: 14px;
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
       box-shadow: var(--shadow);
       display: flex;
       flex-direction: column;
@@ -83,6 +82,7 @@
       min-height: 0;
       flex: 1;
     }
+    .body:has(#qa.open, #summary.open, #chat.open) .main { margin-right: var(--sidebar-width); }
     .main {
       display: flex;
       flex-direction: column;
@@ -135,7 +135,7 @@
       gap: 4px;
       -webkit-app-region: no-drag;
     }
-    #win-min, #win-fs, #win-close {
+    #win-min, #win-close {
       font-size: 13px;
       line-height: 1;
     }
@@ -147,36 +147,20 @@
     #win-close:hover { color: #fff; background: rgba(248, 113, 113, 0.4); }
     html.is-fullscreen .wrap { padding: 0; }
     html.is-fullscreen .panel { border-radius: 0; }
-    #qa-btn, #sum-toggle { width: auto; padding: 0 8px; font-size: 11px; font-weight: 600; }
-    #qa-btn {
-      color: #8e8e93;
-      background: rgba(142, 142, 147, 0.22);
-      border-color: rgba(142, 142, 147, 0.35);
-    }
-    #qa-btn:hover { color: #d1d1d6; background: rgba(142, 142, 147, 0.32); }
-    #qa-btn.on {
+    #qa-toggle, #sum-toggle, #chat-toggle { width: auto; padding: 0 8px; font-size: 11px; font-weight: 600; }
+    #qa-toggle.on, #sum-toggle.on, #chat-toggle.on {
       color: #fff;
       background: var(--ok);
       border-color: var(--ok);
     }
-    #qa-btn.on:hover { color: #fff; background: #24b84b; }
-    #sum-btn {
-      appearance: none;
-      border: 0;
-      border-radius: 8px;
-      padding: 7px 12px;
-      font: 12px/1 inherit;
-      font-weight: 600;
-      cursor: pointer;
-      background: var(--accent);
-      color: var(--save-fg);
-      width: 100%;
-    }
-    #sum-btn:disabled { opacity: 0.6; cursor: default; }
-    #summary {
+    #qa-toggle.on:hover, #sum-toggle.on:hover, #chat-toggle.on:hover { color: #fff; background: #24b84b; }
+    #summary, #qa, #chat {
       display: flex;
       flex-direction: column;
-      position: relative;
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
       z-index: 5;
       width: 0;
       min-width: 0;
@@ -191,32 +175,42 @@
       pointer-events: none;
       transition: width 0.2s ease;
     }
-    #summary.open {
-      width: min(280px, 46%);
+    #summary.open, #qa.open, #chat.open {
+      width: var(--sidebar-width);
+      box-sizing: border-box;
       border-left: 1px solid var(--line);
       pointer-events: auto;
     }
     #summary .cfg-hd,
     #summary #sum-text,
     #summary .cfg-foot {
-      min-width: 240px;
+      min-width: 0;
+    }
+    #qa-content {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-wrap: anywhere;
+    }
+    #qa-status {
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
     }
     #sum-text {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
       padding: 10px 12px;
-      color: var(--text);
-      font-size: 13px;
-      line-height: 1.45;
-      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
     #sum-text:empty::before {
       content: "No summary yet";
       color: var(--muted);
     }
-    #sum-text.pending { color: var(--muted); }
-    #dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; }
+    #ready-status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #8e8e93; }
     #dot.on { background: #4ade80; }
     .cfg-backdrop {
       display: none;
@@ -235,7 +229,9 @@
       top: 0;
       right: 0;
       bottom: 0;
-      width: min(300px, 88%);
+      width: var(--sidebar-width);
+      min-width: 0;
+      box-sizing: border-box;
       z-index: 20;
       margin: 0;
       padding: 0;
@@ -384,9 +380,6 @@
       flex: 0 0 auto;
     }
     #history {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
       padding: 0 10px 8px;
       display: flex;
       flex-direction: column;
@@ -394,9 +387,9 @@
     }
     .qa-card {
       display: grid;
-      grid-template-columns: 32px 1fr;
+      grid-template-columns: 20px minmax(0, 1fr);
       gap: 4px 10px;
-      padding: 12px 14px;
+      padding: 36px 14px 14px;
       border-radius: 10px;
       background: var(--card);
       position: relative;
@@ -405,8 +398,7 @@
       background: var(--card-current);
       border-left: 3px solid var(--accent);
     }
-    .qa-card:not(.current) { opacity: 0.7; }
-    .qa-card.draft .a-text { color: var(--draft); }
+    .qa-card:not(.current) { opacity: 0.92; }
     .q-label, .a-label {
       font-weight: 700;
       font-size: 13px;
@@ -414,17 +406,16 @@
     }
     .q-label { color: var(--accent); }
     .a-label { color: var(--ok); }
-    .q-text {
+    .q-text, .a-text {
       color: var(--text);
       font-size: 14px;
+      font-weight: 400;
+      line-height: 1.5;
+    }
+    .q-text {
       border-bottom: 1px solid var(--hairline);
       padding-bottom: 8px;
       margin-bottom: 8px;
-    }
-    .a-text {
-      color: var(--text);
-      font-size: 17px;
-      line-height: 1.5;
     }
     .qa-badge {
       position: absolute;
@@ -447,7 +438,7 @@
       border: 0;
       border-radius: 6px;
       background: transparent;
-      color: #64748b;
+      color: var(--text);
       font: 16px/1 inherit;
       cursor: pointer;
       padding: 0;
@@ -488,25 +479,63 @@
       white-space: nowrap;
       opacity: 0.7;
     }
+    #transcript, #sum-text, #chat-messages {
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--text);
+    }
     #transcript {
       display: none;
-      max-height: 22vh;
+      flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 4px 12px 8px;
       border-top: 1px solid var(--line);
-      font-size: 11px;
-      line-height: 1.4;
-      color: #64748b;
     }
     #transcript.open { display: block; }
-    #transcript .t { opacity: 0.75; }
-    #transcript .t.ext { color: var(--ext); opacity: 0.85; }
+    #transcript .t { padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+    .tx-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .tx-speaker { border-radius: 4px; background: var(--chip); padding: 1px 5px; font-weight: 600; }
+    .t.ext .tx-speaker { color: var(--ext); }
+    .tx-body { white-space: pre-wrap; }
+    .rich-text { white-space: normal; overflow-wrap: anywhere; }
+    .rich-text p { margin: 0 0 0.65em; white-space: pre-wrap; }
+    .rich-text ul, .rich-text ol { margin: 0 0 0.65em; padding-left: 1.5em; }
+    .rich-text li { margin: 0.25em 0; }
+    .rich-text .text-heading { font-weight: 600; margin-top: 0.8em; }
+    .rich-text code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.92em; background: var(--chip); border-radius: 4px; padding: 1px 4px; }
+    .rich-text pre { white-space: pre; overflow-x: auto; max-width: 100%; margin: 0.6em 0; padding: 10px; background: var(--chip); border-radius: 8px; }
+    .rich-text pre code { padding: 0; background: transparent; }
+    .rich-text > :last-child { margin-bottom: 0; }
+    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 480px) {
+      .wrap { padding: 4px; }
+      .hdr-actions { gap: 4px; }
+      .body:has(#qa.open, #summary.open, #chat.open) .main { visibility: hidden; }
+      #qa.open, #summary.open, #chat.open, #settings { width: 100%; }
+    }
     footer {
       padding: 4px 12px 7px;
       color: var(--muted);
       font-size: 10px;
       border-top: 1px solid var(--line);
     }
+    #chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 16px; color: var(--text); font-size: 13px; line-height: 1.6; }
+    #chat-messages:empty { display: grid; place-content: center; text-align: center; }
+    #chat-messages:empty::before { content: "What would you like to know?"; font-size: 17px; font-weight: 600; }
+    #chat-messages:empty::after { content: "Ask anything about this conversation."; color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .chat-message { margin-bottom: 24px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .chat-message.user { margin-left: auto; width: fit-content; max-width: 85%; border-radius: 18px; padding: 10px 14px; background: var(--card-current); }
+    .chat-message.assistant { padding: 0 2px; }
+    .chat-copy { display: block; margin-top: 8px; padding: 2px 0; border: 0; background: none; color: var(--muted); font-size: 11px; cursor: pointer; }
+    .chat-copy:hover { color: var(--text); }
+    #chat-form { margin: 0 12px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); }
+    #chat-form:focus-within { border-color: var(--muted); }
+    #chat-input { display: block; width: 100%; box-sizing: border-box; resize: none; min-height: 42px; max-height: 150px; font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); background: transparent; border: 0; outline: none; padding: 4px 0; }
+    .chat-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    #chat-send { flex-shrink: 0; width: 30px; height: 30px; border: 0; border-radius: 50%; background: var(--text); color: var(--bg); font-size: 20px; cursor: pointer; }
+    #chat-send:disabled { opacity: 0.35; cursor: default; }
+    #chat-status { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -516,15 +545,15 @@
         <div class="hdr-left">
           <div class="win-btns">
             <button id="win-min" class="icon-btn" type="button" title="Minimize">─</button>
-            <button id="win-fs" class="icon-btn" type="button" title="Full Screen">⛶</button>
             <button id="win-close" class="icon-btn" type="button" title="Close">×</button>
           </div>
         </div>
         <div class="hdr-actions">
-          <button id="qa-btn" class="icon-btn" type="button" title="Q&A off">QA</button>
-          <button id="sum-toggle" class="icon-btn" type="button" title="Summary">Summary</button>
+          <button id="qa-toggle" class="icon-btn" type="button" title="Q&A" aria-controls="qa" aria-expanded="false">QA</button>
+          <button id="sum-toggle" class="icon-btn" type="button" title="Summary" aria-controls="summary" aria-expanded="false">Summary</button>
+          <button id="chat-toggle" class="icon-btn" type="button" title="Chat about the conversation" aria-controls="chat" aria-expanded="false">Chat</button>
           <button id="cfg-toggle" class="icon-btn" type="button" title="Settings">⚙</button>
-          <span id="dot"></span>
+          <span id="ready-status" role="status" aria-live="polite" aria-label="Starting…" title="Starting…"><span id="dot" aria-hidden="true"></span></span>
         </div>
       </header>
       <div class="body">
@@ -546,16 +575,23 @@
             <details class="cfg-sec">
               <summary>Q&amp;A</summary>
               <label for="cfg-llm">Model</label>
-              <input id="cfg-llm" name="llm_model" type="text" spellcheck="false" />
+              <input id="cfg-llm" name="llm_model" type="text" spellcheck="false" readonly />
               <label for="cfg-prompt">Prompt</label>
               <textarea id="cfg-prompt" name="prompt" spellcheck="true"></textarea>
             </details>
             <details class="cfg-sec">
               <summary>Summary</summary>
               <label for="cfg-sum-model">Model</label>
-              <input id="cfg-sum-model" name="summary_model" type="text" spellcheck="false" />
+              <input id="cfg-sum-model" name="summary_model" type="text" spellcheck="false" readonly />
               <label for="cfg-sum-prompt">Prompt</label>
               <textarea id="cfg-sum-prompt" name="summary_prompt" spellcheck="true"></textarea>
+            </details>
+            <details class="cfg-sec">
+              <summary>Chat</summary>
+              <label for="cfg-chat-model">Model</label>
+              <input id="cfg-chat-model" type="text" readonly />
+              <label for="cfg-chat-prompt">Prompt</label>
+              <textarea id="cfg-chat-prompt" name="chat_prompt" spellcheck="true" maxlength="8000" placeholder="Leave empty to use the default prompt"></textarea>
             </details>
             <details class="cfg-sec">
               <summary>Transcription</summary>
@@ -577,24 +613,44 @@
           </div>
         </form>
         <div class="main">
-          <div id="current"></div>
-          <div id="history"></div>
           <div id="tx-bar">
-            <button id="tx-toggle" type="button">Transcript ▸</button>
+            <button id="tx-toggle" type="button" aria-label="Toggle transcript" title="Toggle transcript" aria-controls="transcript" aria-expanded="true">▾</button>
             <span id="tx-last"></span>
           </div>
-          <div id="transcript"></div>
+          <div id="transcript" class="open"></div>
           <footer id="lat"></footer>
         </div>
+        <aside id="qa" aria-label="Q&A" inert>
+          <div class="cfg-hd">
+            <div class="cfg-title">Q&amp;A</div>
+            <button id="qa-hide" class="icon-btn" type="button" title="Close Q&A" aria-label="Close Q&A">×</button>
+          </div>
+          <div id="qa-status" role="status" aria-live="polite">Q&amp;A is off. Open QA to start.</div>
+          <div id="qa-content">
+            <div id="current"></div>
+            <div id="history"></div>
+          </div>
+        </aside>
+        <aside id="chat" aria-label="Conversation chat" inert>
+          <div class="cfg-hd">
+            <div class="cfg-title">Chat</div>
+            <button id="chat-hide" class="icon-btn" type="button" title="Close Chat" aria-label="Close Chat">×</button>
+          </div>
+          <div id="chat-messages" role="log" aria-live="polite"></div>
+          <form id="chat-form">
+            <textarea id="chat-input" aria-label="Question about the conversation" placeholder="Ask anything about this conversation" rows="1" maxlength="8000" required></textarea>
+            <div class="chat-composer-actions">
+              <div id="chat-status" role="status"></div>
+              <button id="chat-send" type="submit" title="Send message" aria-label="Send message" disabled>↑</button>
+            </div>
+          </form>
+        </aside>
         <aside id="summary" inert>
           <div class="cfg-hd">
             <div class="cfg-title">Summary</div>
             <button id="sum-hide" class="icon-btn" type="button" title="Delete">×</button>
           </div>
           <div id="sum-text"></div>
-          <div class="cfg-foot">
-            <button id="sum-btn" type="button">Summarize</button>
-          </div>
         </aside>
       </div>
     </section>
@@ -607,13 +663,19 @@
     const txLast = document.getElementById("tx-last");
     const lat = document.getElementById("lat");
     const dot = document.getElementById("dot");
+    const readyStatus = document.getElementById("ready-status");
+    function setReady(ready, text) {
+      dot.classList.toggle("on", ready);
+      const label = ready ? "Ready" : text;
+      readyStatus.setAttribute("aria-label", label);
+      readyStatus.title = label;
+    }
     const panel = document.querySelector(".panel");
     const settings = document.getElementById("settings");
     const cfgToggle = document.getElementById("cfg-toggle");
     const cfgClose = document.getElementById("cfg-close");
     const cfgBackdrop = document.getElementById("cfg-backdrop");
     const winMin = document.getElementById("win-min");
-    const winFs = document.getElementById("win-fs");
     const winClose = document.getElementById("win-close");
     const cfgLlm = document.getElementById("cfg-llm");
     const cfgWhisper = document.getElementById("cfg-whisper");
@@ -621,13 +683,28 @@
     const cfgClear = document.getElementById("cfg-clear");
     const cfgPrompt = document.getElementById("cfg-prompt");
     const cfgSumModel = document.getElementById("cfg-sum-model");
+    const cfgChatModel = document.getElementById("cfg-chat-model");
+    const cfgChatPrompt = document.getElementById("cfg-chat-prompt");
     const cfgSumPrompt = document.getElementById("cfg-sum-prompt");
     const cfgConf = document.getElementById("cfg-conf");
     const cfgConfVal = document.getElementById("cfg-conf-val");
     const cfgThemes = document.getElementById("cfg-themes");
-    const qaBtn = document.getElementById("qa-btn");
+    const chatBox = document.getElementById("chat");
+    const chatToggle = document.getElementById("chat-toggle");
+    const chatInput = document.getElementById("chat-input");
+    const chatMessages = document.getElementById("chat-messages");
+    const chatStatus = document.getElementById("chat-status");
+    const chatSend = document.getElementById("chat-send");
+    const chatForm = document.getElementById("chat-form");
+    let chatBusy = false;
+    let chatHistory = [];
+    let qaEnabled = false;
+    const qaStatus = document.getElementById("qa-status");
+    const qaToggle = document.getElementById("qa-toggle");
+    const qaHide = document.getElementById("qa-hide");
+    const qaBox = document.getElementById("qa");
     const sumToggle = document.getElementById("sum-toggle");
-    const sumBtn = document.getElementById("sum-btn");
+    let summaryPending = false;
     const sumHide = document.getElementById("sum-hide");
     const summaryBox = document.getElementById("summary");
     const sumText = document.getElementById("sum-text");
@@ -644,7 +721,8 @@
 
     txToggle.addEventListener("click", () => {
       const open = transcript.classList.toggle("open");
-      txToggle.textContent = open ? "Transcript ▾" : "Transcript ▸";
+      txToggle.textContent = open ? "▾" : "▸";
+      txToggle.setAttribute("aria-expanded", String(open));
     });
     function setConfigOpen(open) {
       settings.classList.toggle("open", open);
@@ -652,25 +730,135 @@
       cfgToggle.classList.toggle("on", open);
       settings.inert = !open;
       if (open) {
+        setChatOpen(false);
         setSummaryOpen(false);
+        setQaOpen(false);
         loadConfig();
+      }
+    }
+    function setQaOpen(open) {
+      qaBox.classList.toggle("open", open);
+      qaToggle.classList.toggle("on", open);
+      qaToggle.setAttribute("aria-expanded", String(open));
+      qaBox.inert = !open;
+      if (open) {
+        setChatOpen(false);
+        setSummaryOpen(false);
+        setConfigOpen(false);
       }
     }
     function setSummaryOpen(open) {
       summaryBox.classList.toggle("open", open);
       panel.classList.toggle("sum-open", open);
       sumToggle.classList.toggle("on", open);
+      sumToggle.setAttribute("aria-expanded", String(open));
       summaryBox.inert = !open;
-      if (window.copilot && typeof window.copilot.sidebar === "function") {
-        window.copilot.sidebar(open);
-      }
       if (open) {
+        setChatOpen(false);
         sumWanted = true;
+        setQaOpen(false);
         setConfigOpen(false);
       } else {
         sumWanted = false;
       }
     }
+    function setChatOpen(open) {
+      chatBox.classList.toggle("open", open);
+      chatToggle.classList.toggle("on", open);
+      chatToggle.setAttribute("aria-expanded", String(open));
+      chatBox.inert = !open;
+      if (open) {
+        setQaOpen(false);
+        setSummaryOpen(false);
+        setConfigOpen(false);
+        chatInput.focus();
+      }
+    }
+    function renderChat(messages) {
+      chatMessages.replaceChildren();
+      for (const message of messages) {
+        const row = document.createElement("div");
+        row.className = "chat-message " + (message.role === "user" ? "user" : "assistant");
+        row.setAttribute("aria-label", message.role === "user" ? "You" : "Chat");
+        const text = document.createElement("div");
+        if (message.role === "user") text.textContent = message.content;
+        else renderText(text, message.content);
+        row.append(text);
+        if (message.role === "assistant") {
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "chat-copy";
+          copy.textContent = "Copy";
+          copy.setAttribute("aria-label", "Copy answer");
+          copy.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(message.content);
+              copy.textContent = "Copied";
+              setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+            } catch { chatStatus.textContent = "Could not copy. Select the answer to copy it."; }
+          });
+          row.append(copy);
+        }
+        chatMessages.appendChild(row);
+      }
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+    chatToggle.addEventListener("click", () => setChatOpen(!chatBox.classList.contains("open")));
+    document.getElementById("chat-hide").addEventListener("click", () => {
+      setChatOpen(false);
+      chatToggle.focus();
+    });
+    fetch("/api/chat").then(res => {
+      if (!res.ok) throw new Error("Could not load chat history");
+      return res.json();
+    }).then(body => {
+      if (!chatBusy && !chatHistory.length) {
+        chatHistory = body.messages || [];
+        renderChat(chatHistory);
+      }
+    }).catch(() => {});
+    function updateChatComposer() {
+      chatSend.disabled = chatBusy || !chatInput.value.trim();
+      chatInput.style.height = "auto";
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 150) + "px";
+    }
+    chatInput.addEventListener("input", updateChatComposer);
+    chatInput.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        chatForm.requestSubmit();
+      }
+    });
+    chatForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const question = chatInput.value.trim();
+      if (!question || chatBusy) return;
+      chatBusy = true;
+      chatSend.disabled = true;
+      chatInput.readOnly = true;
+      chatStatus.textContent = "Thinking…";
+      renderChat([...chatHistory, {role: "user", content: question}]);
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({question}),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || "Chat failed");
+        chatHistory = body.messages;
+        renderChat(chatHistory);
+        chatInput.value = "";
+        chatStatus.textContent = "";
+      } catch (error) {
+        chatStatus.textContent = error.message || "Chat failed. Try again.";
+        renderChat(chatHistory);
+      } finally {
+        chatBusy = false;
+        updateChatComposer();
+        chatInput.readOnly = false;
+        if (chatBox.classList.contains("open")) chatInput.focus();
+      }
+    });
     cfgToggle.addEventListener("click", () => {
       setConfigOpen(!settings.classList.contains("open"));
     });
@@ -680,32 +868,32 @@
     });
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
+      setChatOpen(false);
       setConfigOpen(false);
       setSummaryOpen(false);
+      setQaOpen(false);
     });
-    qaBtn.addEventListener("click", () => setQaEnabled(!qaBtn.classList.contains("on")));
+    qaToggle.addEventListener("click", () => {
+      const open = !qaBox.classList.contains("open");
+      setQaOpen(open);
+      if (open) setQaEnabled(true);
+    });
+    qaHide.addEventListener("click", () => {
+      setQaOpen(false);
+      qaToggle.focus();
+    });
     sumToggle.addEventListener("click", () => {
       const open = !summaryBox.classList.contains("open");
       setSummaryOpen(open);
-      if (open && !sumText.textContent.trim()) startSummary();
+      if (open && !summaryPending) startSummary();
     });
     function setFullscreenUI(on) {
       document.documentElement.classList.toggle("is-fullscreen", !!on);
-      winFs.textContent = on ? "⤢" : "⛶";
-      winFs.title = on ? "Exit Full Screen" : "Full Screen";
     }
     winMin.addEventListener("click", () => {
       if (window.copilot && typeof window.copilot.minimize === "function") {
         window.copilot.minimize();
       }
-    });
-    winFs.addEventListener("click", () => {
-      if (window.copilot && typeof window.copilot.toggleFullscreen === "function") {
-        window.copilot.toggleFullscreen();
-        return;
-      }
-      if (document.fullscreenElement) document.exitFullscreen();
-      else document.documentElement.requestFullscreen?.();
     });
     winClose.addEventListener("click", () => {
       if (window.copilot && typeof window.copilot.quit === "function") {
@@ -730,7 +918,6 @@
     cfgClear.addEventListener("click", () => {
       clearAllCards(true);
     });
-    sumBtn.addEventListener("click", () => startSummary());
     sumHide.addEventListener("click", () => clearSummary());
     cfgConf.addEventListener("input", () => {
       cfgConfVal.textContent = Number(cfgConf.value).toFixed(2);
@@ -750,6 +937,61 @@
       return String(s ?? "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
       }[c]));
+    }
+    // Build formatted content with DOM text nodes; model output never becomes HTML.
+    function renderText(target, value) {
+      target.replaceChildren();
+      target.classList.add("rich-text");
+      function inline(parent, text) {
+        for (const part of text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g)) {
+          if (!part) continue;
+          const bold = part.startsWith("**") && part.endsWith("**");
+          const code = part.startsWith("`") && part.endsWith("`");
+          if (bold || code) {
+            const el = document.createElement(bold ? "strong" : "code");
+            el.textContent = part.slice(bold ? 2 : 1, bold ? -2 : -1);
+            parent.appendChild(el);
+          } else parent.appendChild(document.createTextNode(part));
+        }
+      }
+      let list = null, paragraph = null, code = null;
+      for (const line of String(value || "").split("\n")) {
+        if (line.trim().startsWith("```")) {
+          list = paragraph = null;
+          if (code) code = null;
+          else {
+            const pre = document.createElement("pre");
+            code = document.createElement("code");
+            pre.appendChild(code);
+            target.appendChild(pre);
+          }
+          continue;
+        }
+        if (code) { code.textContent += line + "\n"; continue; }
+        if (!line.trim()) { list = paragraph = null; continue; }
+        const item = line.match(/^\s*(?:([-*])|\d+[.)])\s+(.+)$/);
+        if (item) {
+          paragraph = null;
+          const tag = item[1] ? "UL" : "OL";
+          if (!list || list.tagName !== tag) {
+            list = document.createElement(tag.toLowerCase());
+            target.appendChild(list);
+          }
+          const li = document.createElement("li");
+          inline(li, item[2]);
+          list.appendChild(li);
+          continue;
+        }
+        list = null;
+        const heading = line.match(/^#{1,6}\s+(.+)$/);
+        if (heading || !paragraph) {
+          paragraph = document.createElement("p");
+          target.appendChild(paragraph);
+        } else paragraph.appendChild(document.createTextNode("\n"));
+        if (heading) paragraph.className = "text-heading";
+        inline(paragraph, heading ? heading[1] : line);
+        if (heading) paragraph = null;
+      }
     }
     function fmtMs(ms) {
       if (ms == null || ms === "") return "";
@@ -778,7 +1020,7 @@
       el.querySelector(".q-text").textContent = ev.question || "";
       const aEl = el.querySelector(".a-text");
       if (ev.answer) {
-        aEl.textContent = ev.answer;
+        renderText(aEl, ev.answer);
       } else {
         aEl.innerHTML = '<span class="dots"></span>';
       }
@@ -797,9 +1039,6 @@
       const b = normQ(next);
       if (!a || !b) return !b;
       if (a === b) return true;
-      const shorter = a.length <= b.length ? a : b;
-      const longer = a.length <= b.length ? b : a;
-      if (longer.startsWith(shorter) && shorter.length / Math.max(longer.length, 1) >= 0.85) return true;
       return false;
     }
     function rememberCard(card) {
@@ -879,10 +1118,13 @@
       }
     }
     function setQaUI(on) {
-      qaBtn.classList.toggle("on", !!on);
-      qaBtn.title = on ? "Q&A on" : "Q&A off";
+      const changed = qaEnabled !== !!on;
+      qaEnabled = !!on;
+      if (!on) qaStatus.textContent = "Q&A is off. Open QA to start.";
+      else if (changed) qaStatus.textContent = "Listening for a question…";
     }
     async function setQaEnabled(on) {
+      const previous = qaEnabled;
       setQaUI(on);
       try {
         const res = await fetch("/api/qa", {
@@ -892,26 +1134,28 @@
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          setQaUI(!on);
+          setQaUI(previous);
           lat.textContent = body.error || "QA toggle failed";
+          qaStatus.textContent = body.error || "QA toggle failed";
           return;
         }
         if (body.qa_enabled != null) setQaUI(body.qa_enabled);
       } catch (e) {
-        setQaUI(!on);
+        setQaUI(previous);
         lat.textContent = "QA toggle failed";
+        qaStatus.textContent = "QA toggle failed. Check the app connection and try again.";
       }
     }
     function showSummary(text, pending) {
       if (sumCleared) return;
       sumText.classList.toggle("pending", !!pending);
-      sumText.textContent = text || "";
+      renderText(sumText, text || "");
       if (sumWanted) setSummaryOpen(true);
     }
     function clearSummary() {
       sumCleared = true;
       sumWanted = false;
-      sumBtn.disabled = false;
+      summaryPending = false;
       sumText.textContent = "";
       sumText.classList.remove("pending");
       setSummaryOpen(false);
@@ -924,7 +1168,7 @@
     async function startSummary() {
       sumCleared = false;
       sumWanted = true;
-      sumBtn.disabled = true;
+      summaryPending = true;
       showSummary("Starting summary…", true);
       try {
         const res = await fetch("/api/summary", {
@@ -935,16 +1179,16 @@
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           showSummary(body.error || "Summary failed", false);
-          sumBtn.disabled = false;
+          summaryPending = false;
         }
       } catch (e) {
         showSummary("Summary failed", false);
-        sumBtn.disabled = false;
+        summaryPending = false;
       }
     }
     function applyTheme(name, persist) {
-      const raw = String(name || "black").toLowerCase();
-      const theme = raw === "white" || raw === "light" || raw === "mac-white" ? "white" : "black";
+      const raw = String(name || "white").toLowerCase();
+      const theme = raw === "black" || raw === "dark" || raw === "mac-black" || raw === "mac black" ? "black" : "white";
       document.documentElement.dataset.theme = theme;
       cfgThemes.querySelectorAll(".theme-dot").forEach((btn) => {
         btn.classList.toggle("on", btn.dataset.theme === theme);
@@ -964,6 +1208,8 @@
       if (cfg.whisper_model && !whisperDirty) cfgWhisper.value = cfg.whisper_model;
       if (cfg.prompt != null) cfgPrompt.value = cfg.prompt;
       if (cfg.summary_model) cfgSumModel.value = cfg.summary_model;
+      if (cfg.chat_model) cfgChatModel.value = cfg.chat_model;
+      if (cfg.chat_prompt != null) cfgChatPrompt.value = cfg.chat_prompt;
       if (cfg.summary_prompt != null) cfgSumPrompt.value = cfg.summary_prompt;
       if (cfg.recognition_confidence != null) {
         cfgConf.value = String(cfg.recognition_confidence);
@@ -989,12 +1235,11 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            llm_model: cfgLlm.value.trim(),
             whisper_model: cfgWhisper.value,
-            theme: document.documentElement.dataset.theme || "black",
+            theme: document.documentElement.dataset.theme || "white",
             prompt: cfgPrompt.value,
-            summary_model: cfgSumModel.value.trim(),
             summary_prompt: cfgSumPrompt.value,
+            chat_prompt: cfgChatPrompt.value,
             recognition_confidence: Number(cfgConf.value),
           }),
         });
@@ -1018,6 +1263,11 @@
       removeCard(cardFromEl(btn.closest(".qa-card")), true);
     });
     function onEvent(ev) {
+      // Readiness is a current snapshot, including after reconnecting.
+      if (ev.type === "readiness") {
+        setReady(ev.ready === true, ev.text || "Starting…");
+        return;
+      }
       if (ev.t != null) {
         const id = `${ev.t}:${ev.type}:${ev.label || ""}:${ev.text || ev.question || ""}`;
         if (seenEv.has(id)) return;
@@ -1034,10 +1284,13 @@
         const row = document.createElement("div");
         const ext = String(ev.label || "").startsWith("EXT");
         row.className = "t" + (ext ? " ext" : "");
-        row.innerHTML = `<span>${esc(ev.ts)}</span> [${esc(ev.label)}] ${esc(ev.text)}`;
+        row.innerHTML = `<div class="tx-meta"><span>${esc(ev.ts)}</span><span class="tx-speaker">${esc(ev.label)}</span></div><div class="tx-body">${esc(ev.text)}</div>`;
+        const follow = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48;
         transcript.appendChild(row);
-        transcript.scrollTop = transcript.scrollHeight;
+        if (follow) transcript.scrollTop = transcript.scrollHeight;
         txLast.textContent = `[${ev.label}] ${ev.text || ""}`;
+      } else if (ev.type === "qa_status") {
+        qaStatus.textContent = ev.text || "";
       } else if (ev.type === "qa") {
         const draft = ev.kind === "draft" || ev.kind === "fast";
         const q = ev.question || "";
@@ -1077,11 +1330,11 @@
         }
       } else if (ev.type === "summary") {
         showSummary(ev.text || "", !ev.done);
-        if (ev.done) sumBtn.disabled = false;
+        if (ev.done) summaryPending = false;
       } else if (ev.type === "summary_gone") {
         sumCleared = true;
         sumWanted = false;
-        sumBtn.disabled = false;
+        summaryPending = false;
         sumText.textContent = "";
         sumText.classList.remove("pending");
         setSummaryOpen(false);
@@ -1108,10 +1361,10 @@
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(proto + "://" + location.host + "/ws");
       socket = ws;
-      ws.onopen = () => { dot.classList.add("on"); };
+      ws.onopen = () => { setReady(false, "Starting…"); };
       ws.onclose = () => {
         if (socket === ws) socket = null;
-        dot.classList.remove("on");
+        setReady(false, "Reconnecting…");
         clearTimeout(socketTimer);
         socketTimer = setTimeout(connect, 800);
       };
@@ -1120,7 +1373,7 @@
         try { onEvent(JSON.parse(m.data)); } catch (e) {}
       };
     }
-    applyTheme(localStorage.getItem("overlay-theme") || "black", false);
+    applyTheme(localStorage.getItem("overlay-theme") || "white", false);
     loadConfig();
     connect();
   </script>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run from anywhere:  bash run.sh   or   ./run.sh
+# Run from anywhere:  ./start
 # Stop with Ctrl+C  (not Ctrl+Z — that only suspends)
 set -euo pipefail
 
@@ -7,6 +7,11 @@ APP="$(cd "$(dirname "$0")" && pwd)"
 VENV="$APP/venv"
 PY="$VENV/bin/python"
 LOG_DIR="$APP/log"
+
+if [[ "${1:-}" == "--smoke-llm" ]]; then
+  shift
+  exec bash "$APP/backend/llm/smoke.sh" "$@"
+fi
 
 # Prefer a modern interpreter; Apple CLT python3 is often 3.9.
 resolve_python() {
@@ -37,7 +42,7 @@ need_deps=0
 if [[ "$need_deps" -eq 1 ]]; then
   echo "Installing Python deps..."
   "$PY" -m pip install --upgrade pip
-  "$PY" -m pip install -r "$APP/requirements.txt"
+  "$PY" -m pip install -r "$APP/../requirements.txt"
 fi
 
 # pip leaves @rpath pointing at a deleted temp build dir; point it at site-packages.
@@ -96,14 +101,10 @@ mkdir -p "$LOG_DIR"
 export TRANSCRIBE_LOG_DIR="$LOG_DIR"
 cd "$APP"
 
-if [[ "${1:-}" == "--smoke-llm" ]]; then
-  exec "$PY" -m llm.smoke
-fi
-
 ELECTRON_BIN="$APP/node_modules/.bin/electron"
 if [[ ! -x "$ELECTRON_BIN" ]] && command -v npm >/dev/null 2>&1 && [[ "${1:-}" != "--list-devices" ]]; then
   echo "Installing Electron overlay..."
   (cd "$APP" && npm install --no-fund --no-audit)
 fi
 
-exec "$PY" "$APP/main.py" "$@"
+exec "$PY" "$APP/backend/main.py" "$@"

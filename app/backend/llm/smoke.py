@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -47,11 +48,16 @@ def ok(msg: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Test inference using FUNCTION_URL; no AWS profile needed.")
+    parser.add_argument("--model", help="Override LLM_MODEL for this test")
+    parser.add_argument("--quick", action="store_true", help="Send only one hello request")
+    args = parser.parse_args()
+    load_dotenv(ROOT.parent.parent / ".env")
     load_dotenv(ROOT / ".env")
     load_dotenv(ROOT.parent / ".env")
     url = (os.environ.get("FUNCTION_URL") or "").strip()
     key = (os.environ.get("INFERENCE_API_KEY") or os.environ.get("API_KEY") or "1234").strip()
-    model = (os.environ.get("LLM_MODEL") or "qwen3-next-80b-a3b").strip()
+    model = (args.model or os.environ.get("LLM_MODEL") or "nova-pro").strip()
 
     q, a = parse_qa(
         "Q: What is the difference between Python and Java?\n"
@@ -62,7 +68,7 @@ def main() -> None:
     ok("parse_qa")
 
     if not url:
-        fail("FUNCTION_URL is empty — set it in transcribe/.env")
+        fail("FUNCTION_URL is empty — set it in the project root .env")
 
     print(f"URL   {url.rstrip('/')}/v1/chat/completions")
     print(f"model {model}")
@@ -72,6 +78,9 @@ def main() -> None:
     if not hello:
         fail("chat returned empty")
     ok(f"chat  {hello[:120]}")
+    if args.quick:
+        print("Inference smoke test passed.")
+        return
 
     streamed = "".join(client.chat_stream("Say hi in three words.", max_tokens=32))
     if not streamed.strip():
@@ -94,4 +103,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        fail(str(exc))
