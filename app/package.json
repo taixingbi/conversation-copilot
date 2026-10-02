@@ -2,7 +2,7 @@
   "name": "conversation-copilot",
   "version": "1.0.0",
   "private": true,
-  "main": "main.js",
+  "main": "ui/main.js",
   "scripts": {
     "postinstall": "node node_modules/electron/install.js",
     "start": "electron .",
@@ -17,8 +17,8 @@
     "appId": "com.taixing.conversation-copilot",
     "productName": "conversation-copilot",
     "files": [
-      "main.js",
-      "preload.js"
+      "ui/main.js",
+      "ui/preload.js"
     ],
     "extraResources": [
       {

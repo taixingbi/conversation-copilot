@@ -16,7 +16,7 @@ _NORM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+")
 
 
 def _prompt_path() -> Path:
-    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[3]))
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     return root / "prompt" / "qa_instructions.txt"
 
 

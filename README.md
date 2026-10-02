@@ -87,13 +87,59 @@ app/
 
 - `prompt/qa_instructions.txt`: default live question extraction instructions.
 - `prompt/qa_prompt.txt`, `prompt/summary_prompt.txt`, `prompt/chat_prompt.txt`: saved prompts edited in Config.
-- `app/backend/`: Python backend and overlay interface.
-- `app/main.js`, `app/preload.js`: Electron window and bridge.
+- `app/ui/`: Electron window, preload bridge, overlay HTML and HTTP/WebSocket presentation.
+- `app/ai/`: LLM transport, prompts, question extraction and conversation memory.
+- `app/audio/`: speech recognition, VAD, speaker tracking and audio cleanup.
+- `app/main.py`, `app/application.py`, `app/runtime.py`: CLI, component wiring and runtime API.
+- `app/settings.py`: configuration validation and persistence.
+- `app/events.py`, `app/metrics.py`: shared event transport and latency metrics.
+- `app/ui/main.js`, `app/ui/preload.js`: Electron window and bridge.
 - `.env`: local configuration and inference credentials.
 - `app/profile/`: reference notes.
-- `app/log/`: session transcripts and answers.
+- `log/`: session transcripts and extracted questions.
 - `app/tests/`, `app/packaging/`: tests and packaging configuration.
 - `app/venv/`, `app/node_modules/`, `app/models/`: local dependencies and models.
+
+The three components have these boundaries:
+
+```text
+app/
+├── ui/       Electron, preload, overlay, HTTP/WebSocket, window lifecycle
+├── ai/       extraction, Chat, Summary, LLM transport, prompts and memory
+├── audio/    capture, VAD, ASR, pipeline, transcript store and model lifecycle
+├── main.py          CLI entrypoint
+├── application.py   component wiring and session startup/shutdown
+├── runtime.py       composed AI/audio services exposed to UI
+├── settings.py      configuration validation and persistence
+├── events.py        shared event transport
+├── console.py       shared terminal output
+└── metrics.py       shared latency measurements
+```
+
+`ai/` and `audio/` do not import each other or UI code. `Runtime` composes an
+`AiService` and `AudioService`; AI receives a finalized transcript reader, while
+`AudioPipeline` delivers confirmed speech through an injected callback.
+`AudioFrame` and `TranscriptUpdate` define the capture and ASR contracts.
+`TranscriptStore` publishes partial replacements and saves each nonempty final
+once, rejecting duplicate finals and revisions after finalization. AI never
+writes source speech. The store owns log reads/writes; EventBus is live transport.
+
+Capture runs in 40 ms blocks. Pipeline buffers 32 ms VAD windows and sends each
+window before its endpoint commit, always committing before transmitting the
+next window. Partial recognition jobs coalesce; the final queue is bounded and
+applies backpressure instead of evicting confirmed speech. Capture overflow is
+reported explicitly when recognition or network transmission falls behind.
+UI rendering distinguishes partial/final and utterance IDs, including when the
+text is unchanged. Incoming UI WebSocket fragments survive socket timeouts.
+
+Chat, Summary and extraction have independent LLM cancellation scopes. Clearing
+or restarting Summary cancels its active streams and prevents stale publication.
+Synchronous LLM response reads are tracked for cancellation; connecting or waiting
+for HTTP headers remains limited by the transport timeout. Native ASR cannot be
+forcibly cancelled; shutdown reports a timeout if recognition does not finish.
+
+`ui/` sends requests and displays events through the runtime API. Source files
+for Electron live in `ui/`; npm scripts and build configuration stay at `app/`.
 
 Implementation and supporting files live in `app/`. Git configuration remains
 at the root. `start` works from any directory.
@@ -107,7 +153,8 @@ npm --prefix app run backend
 npm --prefix app run dist
 ```
 
-Logs and build outputs are created inside `app/`.
+Session logs are created in root `log/`; build outputs are created inside `app/`.
+Packaged apps store logs in their user-data directory.
 
 ### 持续转写与 partial/final
 
@@ -124,9 +171,10 @@ Logs and build outputs are created inside `app/`.
 不能直接填任意厂商的 API URL；部署的 ASR bridge 需实现：
 
 - 首条 JSON：`{"type":"start","source":"MIC","sample_rate":16000,
-  "encoding":"pcm_s16le","frame_ms":40,"vocabulary":["Bedrock","IAM","LangGraph"],"context":""}`。
+  "encoding":"pcm_s16le","frame_ms":32,"vocabulary":["Bedrock","IAM","LangGraph"],"context":""}`。
 - 后续 binary 消息：连续单声道 PCM16 little-endian，每条最多 640 samples（40 ms），
-  包含静音；连接不随语句关闭。可用 `STT_WS_TOKEN` 发送 Bearer 鉴权。
+  正常上传为 512 samples（32 ms），关闭时可发送较短尾帧；
+  包含静音。连接不随语句关闭。可用 `STT_WS_TOKEN` 发送 Bearer 鉴权。
 - VAD 结束时 JSON：`{"type":"commit","utterance_id":"1","context":"前文"}`。
   bridge 以客户端 commit 为断句依据，语句 ID 从 `1` 递增（每个连接独立）。
 - bridge 返回 `{"type":"partial","utterance_id":"1","text":"..."}` 或

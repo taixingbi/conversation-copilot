@@ -8,7 +8,8 @@ import time
 
 import numpy as np
 
-from noise import english_only, is_junk_line
+from audio.contracts import TranscriptUpdate
+from audio.noise import english_only, is_junk_line
 
 MODEL_ALIASES = {
     "tiny": "tiny.en",
@@ -219,13 +220,64 @@ class Transcriber:
         return texts
 
 
+class RecognitionQueue:
+    """Bounded pending work; coalesce partials and backpressure final producers."""
+
+    def __init__(self, capacity):
+        from collections import deque
+        if capacity < 1:
+            raise ValueError("max_jobs must be positive")
+        self.maxsize = capacity
+        self._jobs = deque()
+        self._condition = threading.Condition()
+
+    def submit(self, job, *, active):
+        source, _, _, phase, uid = job
+        with self._condition:
+            self._jobs = type(self._jobs)(old for old in self._jobs
+                if not (old[0] == source and old[4] == uid and old[3] == "partial"))
+            if phase == "partial" and len(self._jobs) >= self.maxsize:
+                return False
+            while len(self._jobs) >= self.maxsize:
+                # Partials can be replaced by any final; finals never evict finals.
+                partial = next((i for i, old in enumerate(self._jobs) if old[3] == "partial"), None)
+                if partial is not None:
+                    del self._jobs[partial]
+                    break
+                if not active:
+                    raise queue.Full("Start recognition before submitting more final jobs")
+                if not self._condition.wait(timeout=10):
+                    raise RuntimeError("Recognition stalled: final queue is full")
+            self._jobs.append(job)
+            self._condition.notify_all()
+            return True
+
+    def get(self, timeout=None):
+        with self._condition:
+            if not self._condition.wait_for(lambda: bool(self._jobs), timeout=timeout):
+                raise queue.Empty
+            job = self._jobs.popleft()
+            self._condition.notify_all()
+            return job
+
+    def get_nowait(self):
+        return self.get(timeout=0)
+
+    def qsize(self):
+        with self._condition:
+            return len(self._jobs)
+
+    def empty(self):
+        return self.qsize() == 0
+
+
 class SttWorker:
     """Decode rolling utterances off capture; coalesce partials and preserve finals."""
 
     def __init__(self, stt: Transcriber, tracker=None, *, max_jobs: int = 4):
         self.stt = stt
         self.tracker = tracker
-        self.jobs: queue.Queue = queue.Queue(maxsize=max_jobs)
+        self.jobs = RecognitionQueue(max_jobs)
         self.results: queue.Queue = queue.Queue()
         self._stt_lock = threading.Lock()
         self._stop = threading.Event()
@@ -244,17 +296,10 @@ class SttWorker:
         if samples is None:
             return
         job = (prefix, samples.copy(), t_end if t_end is not None else time.monotonic(), phase, utterance_id)
-        # Coalesce queued partials for this utterance; final jobs are never evicted.
-        with self.jobs.mutex:
-            self.jobs.queue = type(self.jobs.queue)(
-                old for old in self.jobs.queue
-                if not (old[0] == prefix and old[4] == utterance_id and old[3] == "partial")
-            )
-            self.jobs.queue.append(job)
-            self.jobs.not_empty.notify()
+        self.jobs.submit(job, active=self._thread.is_alive())
 
-    def drain(self) -> list[tuple[str, list[str], dict]]:
-        out: list[tuple[str, list[str], dict]] = []
+    def drain(self) -> list[TranscriptUpdate]:
+        out: list[TranscriptUpdate] = []
         while True:
             try:
                 out.append(self.results.get_nowait())
@@ -262,10 +307,18 @@ class SttWorker:
                 break
         return out
 
+    def _result(self, label, texts, info):
+        self.results.put(TranscriptUpdate(label=label, text=" ".join(texts),
+            phase=info.get("phase", "final"), utterance_id=info.get("utterance_id"),
+            ts=time.strftime("%H:%M:%S"), seg_end=info.get("seg_end"),
+            stt_ms=float(info.get("stt_ms") or 0), error=info.get("error")))
+
     def close(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join()
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                logger.error("Recognition shutdown timed out; %s queued jobs remain", self.jobs.qsize())
 
     def _loop(self) -> None:
         while not self._stop.is_set() or not self.jobs.empty():
@@ -286,10 +339,10 @@ class SttWorker:
                 texts = stt.transcribe(audio, source=prefix, phase=phase) if utterance_id is not None else stt.transcribe(audio)
             except Exception as exc:
                 logger.exception("Transcription failed for %s", prefix)
-                self.results.put((label, [], {"error": str(exc), "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None}))
+                self._result(label, [], {"error": str(exc), "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None})
                 continue
             stt_ms = (time.perf_counter() - t0) * 1000
-            self.results.put((label, texts, {"stt_ms": stt_ms, "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None}))
+            self._result(label, texts, {"stt_ms": stt_ms, "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None})
 
 
 class WebSocketSttWorker:
@@ -328,7 +381,7 @@ class WebSocketSttWorker:
             ws = websocket.create_connection(self.url, header=headers, timeout=5)
             ws.settimeout(0.5)
             ws.send(json.dumps({"type": "start", "source": source, "sample_rate": 16000,
-                                "encoding": "pcm_s16le", "frame_ms": 40,
+                                "encoding": "pcm_s16le", "frame_ms": 32,
                                 "vocabulary": os.environ.get("STT_VOCABULARY", "Bedrock,IAM,LangGraph,AWS").split(","),
                                 "context": self.context.get(source, "")}))
             self.connections[source] = ws
@@ -363,13 +416,13 @@ class WebSocketSttWorker:
                         self.pending.discard((source, str(uid)))
                         self._finals.notify_all()
                     self.context[source] = (self.context.get(source, "") + " " + text)[-2000:]
-                self.results.put((source, [text] if text else [], {
+                self._result(source, [text] if text else [], {
                     "phase": phase, "utterance_id": f"{source}:{uid}",
                     "seg_end": time.monotonic(),
-                }))
+                })
         except Exception as exc:
             if not self._stop.is_set():
-                self.results.put((source, [], {"error": str(exc)}))
+                self._result(source, [], {"error": str(exc)})
 
     def submit(self, prefix, audio, *, t_end=None, phase="final", utterance_id=None):
         import json
@@ -379,6 +432,7 @@ class WebSocketSttWorker:
             self.connections[prefix].send(json.dumps({"type": "commit", "utterance_id": utterance_id,
                                                        "context": self.context.get(prefix, "")}))
 
+    _result = SttWorker._result
     drain = SttWorker.drain
 
     def close(self):

@@ -6,9 +6,9 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from speakers import SpeechVad, OnlineSpeakerTracker
-from stt import SttWorker, WebSocketSttWorker, Transcriber, usable_audio
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from audio.speakers import SpeechVad, OnlineSpeakerTracker
+from audio.stt import SttWorker, WebSocketSttWorker, Transcriber, usable_audio
 from events import EventBus
 
 
@@ -38,15 +38,15 @@ class RecognitionTests(unittest.TestCase):
         audio = np.full(1600, 0.1, dtype=np.float32)
         worker.submit("MIC", audio)
         worker.submit("EXT", audio)
-        with self.assertLogs("stt", level="ERROR"):
+        with self.assertLogs("audio.stt", level="ERROR"):
             worker.start()
             try:
                 first = worker.results.get(timeout=2)
                 second = worker.results.get(timeout=2)
             finally:
                 worker.close()
-        self.assertEqual(first[2]["error"], "bad features")
-        self.assertEqual(second[:2], ("EXT", ["hello"]))
+        self.assertEqual(first.error, "bad features")
+        self.assertEqual((second.label, second.text), ("EXT", "hello"))
 
     def make_vad(self):
         vad = SpeechVad.__new__(SpeechVad)
@@ -109,7 +109,7 @@ class RecognitionTests(unittest.TestCase):
         worker.submit("MIC", audio, phase="final", utterance_id="1")
         worker.submit("MIC", audio, phase="partial", utterance_id="2")
         self.assertEqual(worker.jobs.get_nowait()[3:], ("final", "1"))
-        self.assertEqual(worker.jobs.get_nowait()[3:], ("partial", "2"))
+        self.assertTrue(worker.jobs.empty())
 
     def test_context_only_advances_on_final_and_is_source_scoped(self):
         transcriber = Transcriber.__new__(Transcriber)

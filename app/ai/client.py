@@ -118,11 +118,32 @@ class ChatClient:
             raise RuntimeError(payload.get("detail") or payload.get("error") or payload)
         return strip_think(_choice_text(payload))
 
+    def fork(self):
+        """Independent cancellation scope for Chat, Summary and extraction."""
+        return ChatClient(self.url.removesuffix("/v1/chat/completions"), self.api_key, self.model)
+
     def chat(self, prompt: str, max_tokens: int = 120, *, model: str | None = None) -> str:
         used = (model or self.model).strip()
-        with self._request(prompt, max_tokens, used, False) as resp:
+        cancel = threading.Event()
+        with self._lock:
+            self._cancels.append(cancel)
+        resp = None
+        try:
+            resp = self._request(prompt, max_tokens, used, False)
+            self._track(resp)
+            if cancel.is_set():
+                raise RuntimeError("Request cancelled")
             payload = json.loads(resp.read().decode("utf-8"))
-        return self._content_of(payload)
+            if cancel.is_set():
+                raise RuntimeError("Request cancelled")
+            return self._content_of(payload)
+        finally:
+            if resp is not None:
+                self._untrack(resp)
+                resp.close()
+            with self._lock:
+                if cancel in self._cancels:
+                    self._cancels.remove(cancel)
 
     def chat_stream(
         self, prompt: str, max_tokens: int = 120, *, model: str | None = None

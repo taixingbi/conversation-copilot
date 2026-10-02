@@ -1219,7 +1219,7 @@
         cfgConf.value = String(cfg.recognition_confidence);
         cfgConfVal.textContent = Number(cfg.recognition_confidence).toFixed(2);
       }
-      cfgWhisper.disabled = !!cfg.whisper_loading;
+      cfgWhisper.disabled = !!cfg.whisper_loading || cfg.whisper_available === false;
       if (cfg.whisper_loading) cfgNote.textContent = "Loading Whisper " + cfg.whisper_model + "…";
       if (cfg.qa_enabled != null) setQaUI(cfg.qa_enabled);
     }
@@ -1239,7 +1239,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            whisper_model: cfgWhisper.value,
+            whisper_model: cfgWhisper.disabled ? undefined : cfgWhisper.value,
             theme: document.documentElement.dataset.theme || "white",
             prompt: cfgPrompt.value,
             summary_prompt: cfgSumPrompt.value,
@@ -1273,7 +1273,7 @@
         return;
       }
       if (ev.t != null) {
-        const id = `${ev.t}:${ev.type}:${ev.label || ""}:${ev.text || ev.question || ""}`;
+        const id = `${ev.t}:${ev.type}:${ev.label || ""}:${ev.utterance_id || ""}:${ev.phase || ""}:${ev.text || ev.question || ""}`;
         if (seenEv.has(id)) return;
         seenEv.add(id);
         if (seenEv.size > 400) {
@@ -1282,7 +1282,7 @@
         }
       }
       if (ev.type === "transcript") {
-        const line = `${ev.ts}|${ev.label}|${ev.text || ""}`;
+        const line = `${ev.utterance_id || ""}|${ev.phase || "final"}|${ev.ts}|${ev.label}|${ev.text || ""}`;
         if (line === lastTx) return;
         lastTx = line;
         let row = ev.utterance_id && [...transcript.children].find(r => r.dataset.utteranceId === ev.utterance_id);

@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from llm.answer import LlmAnswerer
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ai.answer import LlmAnswerer
 
 
 class QaValidationTests(unittest.TestCase):

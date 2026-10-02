@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
-from llm.client import ChatClient, strip_think
-from llm.prompt import qa_prompt, duplicate_question_prompt
-from llm.extract import extraction_prompt, parse_extraction, ExtractedQuestion
+from ai.client import ChatClient, strip_think
+from ai.prompt import qa_prompt, duplicate_question_prompt
+from ai.extract import extraction_prompt, parse_extraction, ExtractedQuestion
 
 _Q = re.compile(r"^Q:\s*", re.I)
 _A = re.compile(r"^A:\s*", re.I)

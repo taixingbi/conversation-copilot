@@ -63,10 +63,10 @@ function spawnBackend(url) {
     env.TRANSCRIBE_LOG_DIR = path.join(data, "log");
     backend = spawn(packed, ["--no-overlay"], { env, cwd: data });
   } else {
-    const root = __dirname;
+    const root = path.dirname(__dirname);
     const py = path.join(root, "venv", "bin", process.platform === "win32" ? "python.exe" : "python");
     const exe = fs.existsSync(py) ? py : "python3";
-    backend = spawn(exe, [path.join(root, "backend", "main.py"), "--no-overlay"], { env, cwd: root });
+    backend = spawn(exe, [path.join(root, "main.py"), "--no-overlay"], { env, cwd: root });
   }
   backend.stdout?.on("data", (buf) => process.stdout.write(buf));
   backend.stderr?.on("data", (buf) => process.stderr.write(buf));

@@ -5,11 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from events import EventBus
-from questions import QuestionExtractor
-from llm.extract import ExtractedQuestion
-from settings import Runtime
+from ai.questions import QuestionExtractor
+from ai.extract import ExtractedQuestion
+from runtime import Runtime
 
 
 class QaTests(unittest.TestCase):
@@ -17,12 +17,12 @@ class QaTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.bus = EventBus()
-        self.bus_patch = patch("questions.BUS", self.bus)
+        self.bus_patch = patch("ai.questions.BUS", self.bus)
         self.bus_patch.start()
         self.addCleanup(self.bus_patch.stop)
         self.extractor = QuestionExtractor(
             function_url="https://example.test", api_key="test", model="nova-pro",
-            out_path=Path(self.tmp.name) / "questions.txt",
+            out_path=Path(self.tmp.name) / "ai.questions.txt",
         )
 
     def statuses(self):
@@ -71,7 +71,7 @@ class QaTests(unittest.TestCase):
 
     def test_one_second_cadence_and_forty_five_second_window(self):
         self.extractor.set_auto(True)
-        with patch("questions.now_mono", return_value=100) as clock, patch.object(self.extractor, "_spawn") as spawn:
+        with patch("ai.questions.now_mono", return_value=100) as clock, patch.object(self.extractor, "_spawn") as spawn:
             self.extractor.add_ext("00:00:00", "old speech", t_mono=54.9)
             self.extractor.add_ext("00:00:01", "recent speech", t_mono=55.1)
             self.extractor.flush()
@@ -121,7 +121,7 @@ class QaTests(unittest.TestCase):
             self.extractor.close()
 
     def test_time_window_keeps_all_lines_without_count_limit(self):
-        with patch("questions.now_mono", return_value=100):
+        with patch("ai.questions.now_mono", return_value=100):
             for i in range(20):
                 self.extractor.add_ext("00:00:00", f"fragment {i}", t_mono=99)
             with self.extractor._lock:

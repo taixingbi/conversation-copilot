@@ -5,8 +5,8 @@ import json
 import re
 from dataclasses import dataclass
 
-from llm.client import strip_think
-from llm.prompt import effective_prompt
+from ai.client import strip_think
+from ai.prompt import effective_prompt
 
 
 @dataclass(frozen=True)

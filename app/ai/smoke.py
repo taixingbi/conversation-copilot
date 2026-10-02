@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from llm.answer import LlmAnswerer, parse_qa
-from llm.client import ChatClient
+from ai.answer import LlmAnswerer, parse_qa
+from ai.client import ChatClient
 
 CASES = [
     (["What is...", "different.", "between Python and Java."], ("python", "java")),
@@ -52,9 +52,8 @@ def main() -> None:
     parser.add_argument("--model", help="Override LLM_MODEL for this test")
     parser.add_argument("--quick", action="store_true", help="Send only one hello request")
     args = parser.parse_args()
-    load_dotenv(ROOT.parent.parent / ".env")
-    load_dotenv(ROOT / ".env")
     load_dotenv(ROOT.parent / ".env")
+    load_dotenv(ROOT / ".env")
     url = (os.environ.get("FUNCTION_URL") or "").strip()
     key = (os.environ.get("INFERENCE_API_KEY") or "").strip() or "1234"
     model = (args.model or os.environ.get("LLM_MODEL") or "nova-pro").strip()

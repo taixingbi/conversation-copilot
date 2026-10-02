@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from llm.client import ChatClient
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ai.client import ChatClient
 
 
 class ChatClientTests(unittest.TestCase):
@@ -36,6 +36,28 @@ class ChatClientTests(unittest.TestCase):
         self.client._iter_stream = Mock(return_value=iter([]))
         self.client.chat = Mock(return_value="answer")
         self.assertEqual(list(self.client.chat_stream("question")), ["answer"])
+
+    def test_abort_closes_sync_response_and_rejects_late_content(self):
+        resp = Mock()
+        def read():
+            self.client.abort()
+            return b'{"choices":[{"message":{"content":"late"}}]}'
+        resp.read.side_effect = read
+        self.client._request = Mock(return_value=resp)
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            self.client.chat("question")
+        resp.close.assert_called()
+        self.assertEqual(self.client._cancels, [])
+        self.assertEqual(self.client._resps, [])
+
+    def test_fork_has_independent_cancellation(self):
+        other = self.client.fork()
+        resp = Mock()
+        other._track(resp)
+        self.client.abort()
+        resp.close.assert_not_called()
+        other.abort()
+        resp.close.assert_called_once()
 
 
 if __name__ == "__main__":

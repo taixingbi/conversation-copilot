@@ -8,23 +8,39 @@ from PyInstaller.utils.hooks import collect_all
 ROOT = Path(SPECPATH).resolve().parent
 
 datas = [
-    (str(ROOT / "backend/ui/overlay.html"), "ui"),
+    (str(ROOT / "ui/overlay.html"), "ui"),
     (str(ROOT.parent / "prompt/qa_instructions.txt"), "prompt"),
     (str(ROOT / "profile/example.md"), "profile"),
 ]
 binaries = []
 hidden = [
     "events",
-    "memory",
+    "console",
+    "application",
+    "runtime",
+    "settings",
+    "ai.chat",
+    "ai.summary",
+    "audio.contracts",
+    "audio.capture",
+    "audio.pipeline",
+    "audio.service",
+    "ui.lifecycle",
+    "ai.memory",
     "metrics",
-    "noise",
-    "questions",
-    "speakers",
-    "stt",
-    "llm",
-    "llm.answer",
-    "llm.client",
-    "llm.prompt",
+    "audio.noise",
+    "ai.questions",
+    "audio.speakers",
+    "audio.stt",
+    "ai",
+    "ai.answer",
+    "ai.client",
+    "ai.prompt",
+    "ai.extract",
+    "ai.service",
+    "audio.transcripts",
+    "audio",
+    "websocket",
     "ui",
     "ui.server",
 ]
@@ -35,8 +51,8 @@ for pkg in ("sounddevice", "sherpa_onnx", "numpy", "pywhispercpp"):
     hidden += h
 
 a = Analysis(
-    [str(ROOT / "backend/main.py")],
-    pathex=[str(ROOT / "backend")],
+    [str(ROOT / "main.py")],
+    pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hidden,

@@ -19,7 +19,6 @@ log/
 .idea/
 .vscode/
 node_modules/
-overlay/node_modules/
 dist/
 dist-backend/
 build/

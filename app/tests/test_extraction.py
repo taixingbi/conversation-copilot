@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from events import EventBus
-from llm.answer import LlmAnswerer
-from llm.extract import ExtractedQuestion, parse_extraction
-from questions import QuestionExtractor
+from ai.answer import LlmAnswerer
+from ai.extract import ExtractedQuestion, parse_extraction
+from ai.questions import QuestionExtractor
 
 
 class ExtractionContractTests(unittest.TestCase):
@@ -43,11 +43,11 @@ class LiveExtractionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.bus = EventBus()
-        patcher = patch("questions.BUS", self.bus)
+        patcher = patch("ai.questions.BUS", self.bus)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.ex = QuestionExtractor(function_url="https://example.test", api_key="test", model="small",
-                                    out_path=Path(self.tmp.name) / "questions.txt")
+                                    out_path=Path(self.tmp.name) / "ai.questions.txt")
         self.ex.set_auto(True)
         self.ex.llm.extract_latest = Mock(return_value=None)
         patcher = patch.object(self.ex, "_spawn", side_effect=self.ex._run_job)
@@ -58,7 +58,7 @@ class LiveExtractionTests(unittest.TestCase):
         return [e for e in self.bus.snapshot() if e["type"] == "qa"]
 
     def test_wait_does_not_repeat_inference_without_new_speech(self):
-        with patch("questions.now_mono", return_value=100) as clock:
+        with patch("ai.questions.now_mono", return_value=100) as clock:
             self.ex.add_ext("", "[EXT] how did you", t_mono=100)
             self.ex.flush()
             clock.return_value = 102

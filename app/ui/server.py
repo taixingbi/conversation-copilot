@@ -36,54 +36,50 @@ def _ws_encode(text: str) -> bytes:
     return bytes([0x81, 127]) + struct.pack("!Q", n) + data
 
 
-def _ws_read(sock: socket.socket) -> bytes | None:
-    hdr = _recv_exact(sock, 2)
-    if hdr is None:
-        return None
-    opcode = hdr[0] & 0x0F
-    masked = hdr[1] & 0x80
-    n = hdr[1] & 0x7F
-    if n == 126:
-        ext = _recv_exact(sock, 2)
-        if ext is None:
-            return None
-        n = struct.unpack("!H", ext)[0]
-    elif n == 127:
-        ext = _recv_exact(sock, 8)
-        if ext is None:
-            return None
-        n = struct.unpack("!Q", ext)[0]
-    mask = b""
-    if masked:
-        mask = _recv_exact(sock, 4) or b""
-        if len(mask) < 4:
-            return None
-    data = _recv_exact(sock, n) if n else b""
-    if data is None:
-        return None
-    if masked:
-        data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
-    if opcode == 0x8:
-        return None
-    if opcode == 0x9:
-        sock.sendall(bytes([0x8A, len(data)]) + data)
-        return b""
-    return data
-
-
-def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
-    buf = b""
-    while len(buf) < n:
+def _ws_read(sock: socket.socket, pending: bytearray | None = None) -> bytes | None:
+    # The caller retains pending across timeouts, including partial headers/masks.
+    buf = pending if pending is not None else bytearray()
+    while True:
+        if len(buf) >= 2:
+            opcode = buf[0] & 0x0F
+            masked = bool(buf[1] & 0x80)
+            n = buf[1] & 0x7F
+            offset = 2
+            if n == 126:
+                if len(buf) >= 4:
+                    n = struct.unpack("!H", buf[2:4])[0]
+                    offset = 4
+                else:
+                    n = None
+            elif n == 127:
+                if len(buf) >= 10:
+                    n = struct.unpack("!Q", buf[2:10])[0]
+                    offset = 10
+                else:
+                    n = None
+            if n is not None:
+                header = offset + (4 if masked else 0)
+                if len(buf) >= header + n:
+                    mask = buf[offset:header]
+                    data = bytes(buf[header:header + n])
+                    del buf[:header + n]
+                    if masked:
+                        data = bytes(value ^ mask[i % 4] for i, value in enumerate(data))
+                    if opcode == 0x8:
+                        return None
+                    if opcode == 0x9:
+                        sock.sendall(bytes([0x8A, len(data)]) + data)
+                        return b""
+                    return data
         try:
-            chunk = sock.recv(n - len(buf))
+            chunk = sock.recv(4096)
         except (socket.timeout, TimeoutError):
             raise
         except OSError:
             return None
         if not chunk:
             return None
-        buf += chunk
-    return buf
+        buf.extend(chunk)
 
 
 class OverlayServer:
@@ -247,6 +243,7 @@ class OverlayServer:
                 self.wfile.flush()
                 sock = self.connection
                 sock.settimeout(0.25)
+                pending = bytearray()
                 q = bus.subscribe()
                 try:
                     while True:
@@ -257,7 +254,7 @@ class OverlayServer:
                         except queue.Empty:
                             pass
                         try:
-                            if _ws_read(sock) is None:
+                            if _ws_read(sock, pending) is None:
                                 break
                         except (socket.timeout, TimeoutError):
                             continue

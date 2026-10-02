@@ -11,38 +11,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from events import BUS
-from llm.answer import LlmAnswerer
-from llm.extract import ExtractedQuestion
-from memory import ProfileIndex, SessionMemory
+from ai.answer import LlmAnswerer
+from ai.extract import ExtractedQuestion
+from ai.memory import ProfileIndex, SessionMemory
 from metrics import LatencyTracker, now_mono
 
-DIM = "\033[2m"
-CYAN = "\033[36m"
-YELLOW = "\033[1;33m"
-GREEN = "\033[1;32m"
-RESET = "\033[0m"
-
-io_lock = threading.Lock()
-_stream_open = False
-
-
-def paint(text: str, style: str) -> str:
-    if not sys.stdout.isatty():
-        return text
-    return f"{style}{text}{RESET}"
-
-
-def safe_print(text: str = "", style: str = "", *, end: str = "\n") -> None:
-    """Print without tearing a live answer line when transcript also writes."""
-    global _stream_open
-    with io_lock:
-        if _stream_open and end == "\n":
-            print(flush=True)
-            _stream_open = False
-        shown = paint(text, style) if style else text
-        print(shown, end=end, flush=True)
-        if end != "\n":
-            _stream_open = True
+from console import CYAN, DIM, YELLOW, paint, safe_print
 
 
 def questions_path_for(transcribe_path: str | Path) -> Path:
@@ -198,7 +172,7 @@ class QuestionExtractor:
         wall_now, mono_now = time.time(), now_mono()
         with self._lock:
             for ev in BUS.snapshot():
-                if ev.get("type") != "transcript" or not ev.get("text"):
+                if ev.get("type") != "transcript" or ev.get("phase", "final") != "final" or not ev.get("text"):
                     continue
                 age = wall_now - ev.get("t", 0)
                 if 0 <= age <= self.window_sec:

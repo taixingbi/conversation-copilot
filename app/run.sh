@@ -6,11 +6,11 @@ set -euo pipefail
 APP="$(cd "$(dirname "$0")" && pwd)"
 VENV="$APP/venv"
 PY="$VENV/bin/python"
-LOG_DIR="$APP/log"
+LOG_DIR="${TRANSCRIBE_LOG_DIR:-$APP/../log}"
 
 if [[ "${1:-}" == "--smoke-llm" ]]; then
   shift
-  exec bash "$APP/backend/llm/smoke.sh" "$@"
+  exec bash "$APP/ai/smoke.sh" "$@"
 fi
 
 # Prefer a modern interpreter; Apple CLT python3 is often 3.9.
@@ -107,4 +107,4 @@ if [[ ! -x "$ELECTRON_BIN" ]] && command -v npm >/dev/null 2>&1 && [[ "${1:-}" !
   (cd "$APP" && npm install --no-fund --no-audit)
 fi
 
-exec "$PY" "$APP/backend/main.py" "$@"
+exec "$PY" "$APP/main.py" "$@"

@@ -67,6 +67,7 @@ class SpeechVad:
         config.silero_vad.model = str(model_path)
         config.silero_vad.min_silence_duration = float(os.environ.get("STT_SILENCE_SEC", "0.5"))
         config.silero_vad.min_speech_duration = 0.25
+        config.silero_vad.max_speech_duration = float(os.environ.get("STT_MAX_UTTERANCE_SEC", "25"))
         config.sample_rate = sample_rate
         self.window_size = int(config.silero_vad.window_size)
         self.vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
