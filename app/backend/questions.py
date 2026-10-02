@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -7,9 +8,11 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from uuid import uuid4
 
 from events import BUS
 from llm.answer import LlmAnswerer
+from llm.extract import ExtractedQuestion
 from memory import ProfileIndex, SessionMemory
 from metrics import LatencyTracker, now_mono
 
@@ -65,12 +68,15 @@ class QuestionExtractor:
         model: str,
         out_path: Path,
         interval_sec: float = 1.0,
-        window_sec: float = 5.0,
+        window_sec: float = 45.0,
+        target_speakers: tuple[str, ...] = ("EXT",),
         fast_model: str = "",
         metrics: LatencyTracker | None = None,
         memory: SessionMemory | None = None,
         profile: ProfileIndex | None = None,
     ):
+        if interval_sec <= 0 or window_sec <= 0:
+            raise ValueError("QA interval and window must be positive")
         self.memory = memory or SessionMemory()
         self.profile = profile
         self.llm = LlmAnswerer(
@@ -84,6 +90,11 @@ class QuestionExtractor:
         self.out_path = Path(out_path)
         self.interval_sec = interval_sec
         self.window_sec = window_sec
+        self.target_speakers = tuple(s.strip().upper() for s in target_speakers if s.strip())
+        self.current_question: dict | None = None
+        self.previous_questions: deque = deque(maxlen=30)
+        self._revision = 0
+        self._dispatched_revision = -1
         self.metrics = metrics or LatencyTracker()
         self._history: deque = deque()
         self._known: list[str] = []
@@ -132,11 +143,36 @@ class QuestionExtractor:
             return
         stamp = t_mono if t_mono is not None else now_mono()
         with self._lock:
+            label, words = self._split_speaker(body)
+            if self._history:
+                old_stamp, old = self._history[-1]
+                old_label, old_words = self._split_speaker(old)
+                if label == old_label and 0 <= stamp - old_stamp <= 3:
+                    before, after = self._fingerprint(old_words), self._fingerprint(words)
+                    if after == before or (after and before.startswith(after + " ")):
+                        return
+                    if before and after.startswith(before + " "):
+                        self._history.pop()
             self._history.append((stamp, body))
+            if self._eligible(label):
+                self._revision += 1
             self._recent_window(now_mono())
             self._t_last_ext = stamp
             if stt_ms:
                 self._last_stt_ms = stt_ms
+
+    @staticmethod
+    def _fingerprint(text: str) -> str:
+        return re.sub(r"[^\w]+", " ", text.casefold()).strip()
+
+    @staticmethod
+    def _split_speaker(text: str) -> tuple[str, str]:
+        match = re.match(r"^\[([^]]+)\]\s*(.*)$", text, re.S)
+        return (match[1].upper(), match[2]) if match else ("", text)
+
+    def _eligible(self, label: str) -> bool:
+        return not label or any(label == s or (s in {"EXT", "MIC"} and label.startswith(s + "-"))
+                                for s in self.target_speakers)
 
     def _recent_window(self, now: float) -> list[str]:
         # Caller holds _lock. Speech timestamps, not word counts, bound the window.
@@ -145,7 +181,7 @@ class QuestionExtractor:
         return [text for stamp, text in self._history if stamp <= now]
 
     def trigger(self) -> bool:
-        """Evaluate the current five-second window when Q/A is enabled."""
+        """Evaluate the recent transcript window when Q/A is enabled."""
         with self._lock:
             window = self._recent_window(now_mono())
         if not window:
@@ -166,7 +202,7 @@ class QuestionExtractor:
                     continue
                 age = wall_now - ev.get("t", 0)
                 if 0 <= age <= self.window_sec:
-                    self._history.append((mono_now - age, f"[{ev.get('label') or ''}] {ev['text']}"))
+                    self.add_ext("", f"[{ev.get('label') or ''}] {ev['text']}", t_mono=mono_now - age)
 
     def set_model(self, model: str) -> None:
         fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
@@ -178,29 +214,27 @@ class QuestionExtractor:
             return
         with self._lock:
             self._known = [k for k in self._known if _norm_blob(k) != _norm_blob(q)]
+            self.previous_questions = deque(
+                (item for item in self.previous_questions if _norm_blob(item["question"]) != _norm_blob(q)),
+                maxlen=30,
+            )
             current = bool(
-                (self._shown_q and _norm_blob(self._shown_q) == _norm_blob(q))
+                (self.current_question and _norm_blob(self.current_question["question"]) == _norm_blob(q))
+                or (self._shown_q and _norm_blob(self._shown_q) == _norm_blob(q))
                 or (self._final_blob and _norm_blob(self._final_blob) == _norm_blob(q))
             )
-        if current:
-            self._interrupt()
+            if current:
+                self.current_question = None
+                self._interrupt()
         self.memory.forget(q)
 
     def forget_all(self) -> None:
         with self._lock:
             self._known.clear()
-        self._interrupt()
+            self.current_question = None
+            self.previous_questions.clear()
+            self._interrupt()
         self.memory.clear()
-
-    def _write_qa(self, question: str, answer: str) -> None:
-        ts = time.strftime("%H:%M:%S")
-        block = f"[{ts}] Q: {question}\nA: {answer}\n\n"
-        self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.out_path.open("a", encoding="utf-8") as f:
-            f.write(block)
-            f.flush()
-        with self._lock:
-            self._known.append(question)
 
     def _blob(self, window: list[str]) -> str:
         return _norm_blob(" ".join(window))
@@ -235,7 +269,7 @@ class QuestionExtractor:
 
     def _spawn(self, window: list[str], kind: str, gen: int) -> None:
         if kind == "final":
-            BUS.publish("qa_status", text="Generating answer…")
+            BUS.publish("qa_status", text="Identifying the latest question…")
         threading.Thread(
             target=self._run_job,
             args=(list(window), kind, gen),
@@ -248,24 +282,25 @@ class QuestionExtractor:
 
     def _run_job(self, window: list[str], kind: str, gen: int) -> None:
         t0 = time.perf_counter()
-        question = answer = ""
+        question = ""
         try:
             with self._lock:
                 if self._stale(kind, gen):
                     return
-                self.llm.answered_questions = list(self._known)
-            for question, answer in self.llm.iter_qa(window, kind=kind):
-                if self._stale(kind, gen):
-                    return
+                current = self.current_question["question"] if self.current_question else ""
+                previous = [item["question"] for item in self.previous_questions]
+            result = self.llm.extract_latest(window, current=current, previous=previous, speakers=self.target_speakers)
+            if result:
+                question = result.question
             # A completed response is committed atomically with cancellation.
             with self._lock:
                 if self._stale(kind, gen):
                     return
                 elapsed = (time.perf_counter() - t0) * 1000
                 self.metrics.observe("llm_total_ms", elapsed)
-                if question and answer:
+                if question:
                     self.metrics.observe("llm_ttft_ms", elapsed)
-                    self._on_done(question, answer, kind)
+                    self._on_extracted(result, kind)
                     BUS.publish("qa_status", text="Listening for the next question…")
                 else:
                     BUS.publish("qa_status", text="No complete question found. Listening…")
@@ -279,7 +314,7 @@ class QuestionExtractor:
             with self._lock:
                 if gen == self._final_gen:
                     self._final_alive = False
-                    if not question or not answer:
+                    if not question:
                         self._final_blob = ""
                     queued, self._queued_window = self._queued_window, None
             if queued and self.auto_qa and not self._stop.is_set():
@@ -296,13 +331,35 @@ class QuestionExtractor:
             self._t_shown = now_mono()
         self._record_ext_latency()
 
-    def _on_done(self, question: str, answer: str, kind: str) -> None:
-        if not question or not answer:
+    def _on_extracted(self, result: ExtractedQuestion, kind: str) -> None:
+        question, context = result.question, result.context
+        fingerprint = self._fingerprint(question)
+        current = self.current_question
+        if current and fingerprint == current["fingerprint"]:
             return
+        if any(item["fingerprint"] == fingerprint for item in self.previous_questions):
+            return
+        update = result.action == "UPDATE" and current is not None
+        replaced = current["question"] if update else ""
+        item = {"id": current["id"] if update else uuid4().hex,
+                "question": question, "context": context, "fingerprint": fingerprint}
         self._mark_shown(kind)
-        self._write_qa(question, answer)
-        self.memory.add(question, answer)
-        self._render(question, answer, kind)
+        # Append revisions as an audit trail; live state and replay retain one card per id.
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.out_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({**item, "t": time.time(), "action": "UPDATE" if update else "NEW"}, ensure_ascii=False) + "\n")
+        if current and not update:
+            self.previous_questions.append(current)
+        self.current_question = item
+        if update:
+            self._known = [q for q in self._known if q != replaced]
+        self._known.append(question)
+        self._known = self._known[-31:]
+        BUS.publish("qa", question=question, context=context, answer=context,
+                    question_id=item["id"], replaces_question=replaced,
+                    action="UPDATE" if update else "NEW", mode="extraction",
+                    kind=kind, done=True, restart=True, **self._lat_fields())
+        safe_print(f"Q  {question}", YELLOW)
         self._print_lat()
         self._reset_turn()
 
@@ -331,29 +388,21 @@ class QuestionExtractor:
             "stt_ms": self._last_stt_ms or None,
         }
 
-    def _render(self, question: str, answer: str, kind: str) -> None:
-        self._shown_q = question
-        self._shown_a = answer
-        ts = time.strftime("%H:%M:%S")
-        safe_print(f"Q  [{ts}] {question}", YELLOW)
-        safe_print(f"A  {answer}", GREEN)
-        BUS.publish(
-            "qa", question=question, answer=answer, kind=kind,
-            done=True, restart=True, **self._lat_fields(),
-        )
-
     def flush(self, force: bool = False) -> None:
         with self._dispatch_lock:
             with self._lock:
                 now = now_mono()
                 if not force and self._last_call and now - self._last_call < self.interval_sec:
                     return
-                if not self.llm.enabled:
+                if not self.llm.enabled or not self.auto_qa:
+                    return
+                if not force and self._revision == self._dispatched_revision:
                     return
                 window = self._recent_window(now)
                 self._last_call = now
-                if not window:
+                if not window or not any(self._eligible(self._split_speaker(line)[0]) for line in window):
                     return
+                self._dispatched_revision = self._revision
                 if self._final_alive:
                     # Keep the newest snapshot while the asynchronous request completes.
                     self._queued_window = window

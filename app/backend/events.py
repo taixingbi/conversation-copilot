@@ -24,13 +24,20 @@ class EventBus:
     def publish(self, typ: str, **payload) -> dict:
         ev = {"type": typ, "t": time.time(), **payload}
         with self._lock:
+            if typ == "transcript" and payload.get("utterance_id"):
+                self._recent = deque((e for e in self._recent if not (
+                    e.get("type") == "transcript" and e.get("utterance_id") == payload["utterance_id"]
+                )), maxlen=self._keep)
             if typ == "qa":
                 nq = _norm_q(payload.get("question") or "")
                 if nq:
                     kept = [
                         e
                         for e in self._recent
-                        if not (e.get("type") == "qa" and _norm_q(e.get("question") or "") == nq)
+                        if not (e.get("type") == "qa" and (
+                            _norm_q(e.get("question") or "") == nq
+                            or (payload.get("question_id") and e.get("question_id") == payload["question_id"])
+                        ))
                     ]
                     self._recent = deque(kept, maxlen=self._keep)
             elif typ == "summary":

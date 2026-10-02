@@ -89,16 +89,14 @@ def main() -> None:
 
     llm = LlmAnswerer(function_url=url, api_key=key, model=model)
     for i, (ext, needles) in enumerate(CASES, 1):
-        question, answer = llm.qa_from_ext(ext)
-        if not question:
-            fail(f"case {i} no Q (SKIP?)  ext={ext}")
-        if not answer:
-            fail(f"case {i} no A  Q={question}")
-        blob = f"{question} {answer}".lower()
+        result = llm.extract_latest(ext)
+        if result is None:
+            fail(f"case {i} WAIT  ext={ext}")
+        blob = f"{result.question} {result.context}".lower()
         if not any(n in blob for n in needles):
-            fail(f"case {i} off-topic  need {needles}  Q={question}")
-        ok(f"Q{i}   {question}")
-        ok(f"A{i}   {answer}")
+            fail(f"case {i} off-topic  need {needles}  Q={result.question}")
+        ok(f"Q{i}   {result.question}")
+        ok(f"context   {result.context}")
     print("LLM smoke test passed.")
 
 

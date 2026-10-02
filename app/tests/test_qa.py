@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from events import EventBus
 from questions import QuestionExtractor
+from llm.extract import ExtractedQuestion
 from settings import Runtime
 
 
@@ -27,9 +28,9 @@ class QaTests(unittest.TestCase):
     def statuses(self):
         return [e["text"] for e in self.bus.snapshot() if e["type"] == "qa_status"]
 
-    def test_completed_answer_is_published_once_with_line_breaks(self):
+    def test_context_is_published_once_with_line_breaks(self):
         answer = "First paragraph.\n\n- One\n- Two"
-        self.extractor.llm.iter_qa = Mock(return_value=iter([("Explain Python", answer)]))
+        self.extractor.llm.extract_latest = Mock(return_value=ExtractedQuestion("Explain Python", answer))
         self.extractor._run_job(["Explain Python"], "final", 0)
         events = [e for e in self.bus.snapshot() if e["type"] == "qa"]
         self.assertEqual(len(events), 1)
@@ -39,8 +40,8 @@ class QaTests(unittest.TestCase):
     def test_cancel_during_inference_prevents_late_card(self):
         def cancelled(*args, **kwargs):
             self.extractor.set_auto(False)
-            yield "What is Python?", "Python is a language."
-        self.extractor.llm.iter_qa = cancelled
+            return ExtractedQuestion("What is Python?", "Python is a language.")
+        self.extractor.llm.extract_latest = cancelled
         self.extractor._run_job(["What is Python?"], "final", 0)
         self.assertFalse(any(e["type"] == "qa" for e in self.bus.snapshot()))
         self.assertFalse(self.extractor.out_path.exists())
@@ -49,10 +50,10 @@ class QaTests(unittest.TestCase):
         self.extractor.set_auto(True)
         with patch.object(self.extractor, "_spawn", side_effect=self.extractor._run_job):
             for text in ("Hi", "Why", "Python", "the tradeoffs please", "What is", "能介绍一下吗", "It is a language."):
-                self.extractor.llm.iter_qa = Mock(return_value=iter([]))
+                self.extractor.llm.extract_latest = Mock(return_value=None)
                 self.extractor.add_ext("00:00:00", text)
                 self.extractor.flush(force=True)
-                self.assertIn(text, self.extractor.llm.iter_qa.call_args.args[0])
+                self.assertIn(text, self.extractor.llm.extract_latest.call_args.args[0])
 
     def test_new_speech_waits_for_current_request(self):
         self.extractor.set_auto(True)
@@ -68,11 +69,11 @@ class QaTests(unittest.TestCase):
             self.assertEqual(spawn.call_count, 2)
             self.assertIn("And Java", spawn.call_args.args[0])
 
-    def test_one_second_cadence_and_five_second_window(self):
+    def test_one_second_cadence_and_forty_five_second_window(self):
         self.extractor.set_auto(True)
         with patch("questions.now_mono", return_value=100) as clock, patch.object(self.extractor, "_spawn") as spawn:
-            self.extractor.add_ext("00:00:00", "old speech", t_mono=94.9)
-            self.extractor.add_ext("00:00:01", "recent speech", t_mono=95.1)
+            self.extractor.add_ext("00:00:00", "old speech", t_mono=54.9)
+            self.extractor.add_ext("00:00:01", "recent speech", t_mono=55.1)
             self.extractor.flush()
             self.assertEqual(spawn.call_args.args[0], ["recent speech"])
             self.extractor._final_alive = False
@@ -85,7 +86,7 @@ class QaTests(unittest.TestCase):
             self.assertEqual(spawn.call_args.args[0], ["new question"])
             self.assertEqual(spawn.call_count, 2)
             self.extractor._final_alive = False
-            clock.return_value = 107
+            clock.return_value = 147
             self.extractor.flush()
             self.assertEqual(spawn.call_count, 2)
 
@@ -99,8 +100,8 @@ class QaTests(unittest.TestCase):
                 release.wait(2)
             else:
                 finished.set()
-            return iter([])
-        self.extractor.llm.iter_qa = answer
+            return None
+        self.extractor.llm.extract_latest = answer
         self.extractor.set_auto(True)
         try:
             self.extractor.add_ext("00:00:00", "first question")
@@ -126,14 +127,14 @@ class QaTests(unittest.TestCase):
             with self.extractor._lock:
                 self.assertEqual(len(self.extractor._recent_window(100)), 20)
 
-    def test_repeated_question_can_retry_after_skip(self):
+    def test_explicit_trigger_can_retry_after_wait(self):
         self.extractor.set_auto(True)
-        self.extractor.llm.iter_qa = Mock(return_value=iter([]))
+        self.extractor.llm.extract_latest = Mock(return_value=None)
         with patch.object(self.extractor, "_spawn", side_effect=self.extractor._run_job) as spawn:
             self.extractor.add_ext("00:00:00", "What is Python?")
             self.extractor.flush(force=True)
             self.assertFalse(self.extractor._final_blob)
-            self.extractor.llm.iter_qa.return_value = iter([("What is Python?", "Python is a language.")])
+            self.extractor.llm.extract_latest.return_value = ExtractedQuestion("What is Python?", "Python is a language.")
             self.extractor.add_ext("00:00:04", "What is Python?")
             self.extractor.flush(force=True)
             self.assertEqual(spawn.call_count, 2)
@@ -149,10 +150,8 @@ class QaTests(unittest.TestCase):
             self.assertTrue(self.extractor.auto_qa)
             self.assertTrue(any(c.args[1] == "final" for c in spawn.call_args_list))
 
-    def test_enabled_speech_generates_answer_and_saves_it(self):
-        self.extractor.llm.iter_qa = Mock(return_value=iter([
-            ("What is Python?", "Python is a programming language."),
-        ]))
+    def test_enabled_speech_extracts_question_and_saves_it(self):
+        self.extractor.llm.extract_latest = Mock(return_value=ExtractedQuestion("What is Python?", "Python is a programming language."))
         def run_final(window, kind, gen):
             if kind == "final":
                 self.extractor._run_job(window, kind, gen)
@@ -165,7 +164,7 @@ class QaTests(unittest.TestCase):
         self.assertIn("Listening for the next question…", self.statuses())
 
     def test_model_failure_is_visible_and_toggle_can_retry(self):
-        self.extractor.llm.iter_qa = Mock(side_effect=RuntimeError("HTTP 401"))
+        self.extractor.llm.extract_latest = Mock(side_effect=RuntimeError("HTTP 401"))
         self.extractor._run_job(["What is Python?"], "final", 0)
         self.assertTrue(any("HTTP 401" in text for text in self.statuses()))
         with patch.object(self.extractor, "_spawn") as spawn:
@@ -175,12 +174,12 @@ class QaTests(unittest.TestCase):
             self.assertTrue(self.extractor.trigger())
             self.assertTrue(spawn.called)
 
-    def test_skip_and_stale_error_status(self):
-        self.extractor.llm.iter_qa = Mock(return_value=iter([]))
+    def test_wait_and_stale_error_status(self):
+        self.extractor.llm.extract_latest = Mock(return_value=None)
         self.extractor._run_job(["unclear speech"], "final", 0)
         self.assertTrue(any("No complete question" in text for text in self.statuses()))
         before = self.statuses()
-        self.extractor.llm.iter_qa = Mock(side_effect=RuntimeError("cancelled"))
+        self.extractor.llm.extract_latest = Mock(side_effect=RuntimeError("cancelled"))
         self.extractor._run_job(["old question"], "final", -1)
         self.assertEqual(before, self.statuses())
 

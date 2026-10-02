@@ -9,3 +9,6 @@ sherpa-onnx
 #   pip install pyobjc-framework-Cocoa pyobjc-framework-WebKit
 # Pack the backend for the Electron .app:
 #   pip install pyinstaller
+
+# Persistent streaming ASR bridge
+websocket-client

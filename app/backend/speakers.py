@@ -65,7 +65,7 @@ class SpeechVad:
 
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = str(model_path)
-        config.silero_vad.min_silence_duration = 0.15
+        config.silero_vad.min_silence_duration = float(os.environ.get("STT_SILENCE_SEC", "0.5"))
         config.silero_vad.min_speech_duration = 0.25
         config.sample_rate = sample_rate
         self.window_size = int(config.silero_vad.window_size)
@@ -75,9 +75,9 @@ class SpeechVad:
         self._n = 0
         self.sample_rate = sample_rate
         self.min_samples = int(MIN_SEG_SEC * sample_rate)
-        self.max_samples = int(MAX_SEG_SEC * sample_rate)
+        self.max_samples = int(float(os.environ.get("STT_MAX_UTTERANCE_SEC", "25")) * sample_rate)
         chunk_sec = float(os.environ.get("STT_CHUNK_SEC", str(STREAM_CHUNK_SEC)))
-        self.chunk_samples = int(chunk_sec * sample_rate) if chunk_sec > 0 else 0
+        self.chunk_samples = int(max(0.1, chunk_sec) * sample_rate)
         self._emitted = 0
         # Preserve the onset while Silero waits to confirm speech.
         self._preroll = deque(maxlen=max(1, int(0.3 * sample_rate / self.window_size)))
@@ -93,64 +93,55 @@ class SpeechVad:
         self._n = rest.size
         return out
 
-    def accept(self, samples: np.ndarray) -> list[np.ndarray]:
+    def accept(self, samples: np.ndarray) -> list[dict]:
         chunk = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
-        if chunk.size == 0:
-            return []
-        if self.buf.size:
-            chunk = np.concatenate([self.buf, chunk])
-        segs: list[np.ndarray] = []
+        chunk = np.concatenate([self.buf, chunk])
+        updates = []
         i = 0
-        n = chunk.size
-        w = self.window_size
-        while i + w <= n:
-            win = chunk[i : i + w]
-            i += w
+        while i + self.window_size <= chunk.size:
+            win = chunk[i:i + self.window_size]
+            i += self.window_size
             self.vad.accept_waveform(win)
             while not self.vad.empty():
                 self.vad.pop()
             if self.vad.is_speech_detected():
-                if not self._parts and self._preroll:
+                if not self._parts:
+                    self._utterance = getattr(self, "_utterance", 0) + 1
                     self._parts.extend(self._preroll)
-                    self._n += sum(part.size for part in self._preroll)
+                    self._n = sum(part.size for part in self._parts)
                     self._preroll.clear()
-                self._parts.append(win)
+                self._parts.append(win.copy())
                 self._n += win.size
-                if self.chunk_samples > 0:
-                    while self._n > self.max_samples:
-                        old = self._parts.pop(0)
-                        self._n -= old.size
-                        self._emitted = max(0, self._emitted - old.size)
-                    if self._n >= self.min_samples and self._n - self._emitted >= self.chunk_samples:
-                        segs.append(np.concatenate(self._parts))
-                        self._emitted = self._n
-                else:
-                    while self._n >= self.max_samples:
-                        segs.append(self._take(self.max_samples))
+                if self._n >= self.min_samples and self._n - self._emitted >= self.chunk_samples:
+                    updates.append(self._update("partial"))
+                    self._emitted = self._n
+                # Safety bound for speech without pauses; never discard unheard audio.
+                if self._n >= self.max_samples:
+                    updates.append(self._update("final"))
+                    self._take()
+                    self._emitted = 0
             else:
-                if self._n >= self.min_samples and self._n > self._emitted:
-                    segs.append(self._take())
-                else:
-                    self._parts = []
-                    self._n = 0
+                if self._n >= self.min_samples:
+                    updates.append(self._update("final"))
+                self._take()
                 self._emitted = 0
                 self._preroll.append(win.copy())
-        self.buf = chunk[i:]
-        return segs
+        self.buf = chunk[i:].copy()
+        return updates
 
-    def flush(self) -> list[np.ndarray]:
-        if hasattr(self.vad, "flush"):
-            self.vad.flush()
-        while not self.vad.empty():
-            self.vad.pop()
-        if self._n >= self.min_samples and self._n > self._emitted:
-            segs = [self._take()]
-            self._emitted = 0
-            return segs
-        self._parts = []
-        self._n = 0
+    def _update(self, phase: str) -> dict:
+        return {"audio": np.concatenate(self._parts), "phase": phase,
+                "utterance_id": str(getattr(self, "_utterance", 0))}
+
+    def flush(self) -> list[dict]:
+        if self._parts and self.buf.size:
+            self._parts.append(self.buf.copy())
+            self._n += self.buf.size
+        self.buf = np.empty(0, dtype=np.float32)
+        updates = [self._update("final")] if self._n >= self.min_samples else []
+        self._take()
         self._emitted = 0
-        return []
+        return updates
 
 
 class OnlineSpeakerTracker:

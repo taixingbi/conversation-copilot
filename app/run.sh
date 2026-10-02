@@ -38,7 +38,7 @@ fi
 SITE="$(echo "$VENV"/lib/python*/site-packages)"
 
 need_deps=0
-"$PY" -c "import numpy, sounddevice, sherpa_onnx" 2>/dev/null || need_deps=1
+"$PY" -c "import numpy, sounddevice, sherpa_onnx, websocket" 2>/dev/null || need_deps=1
 if [[ "$need_deps" -eq 1 ]]; then
   echo "Installing Python deps..."
   "$PY" -m pip install --upgrade pip

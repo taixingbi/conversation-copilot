@@ -34,7 +34,7 @@ from questions import (
     safe_print,
 )
 from speakers import SAMPLE_RATE, OnlineSpeakerTracker, SpeechVad, ensure_models, tracking_enabled
-from stt import SttWorker, Transcriber, resolve_backend, resolve_model_name
+from stt import WebSocketSttWorker, SttWorker, Transcriber, resolve_backend, resolve_model_name
 
 warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*")
 
@@ -152,14 +152,14 @@ def is_mic_label(label: str) -> bool:
     return label == "MIC" or label.startswith("MIC-")
 
 
-def emit(log_file, label: str, text: str) -> str:
+def emit(log_file, label: str, text: str, **payload) -> str:
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] [{label}] {text}\n"
     meta = paint(f"{ts}  {label:<6}", CYAN if is_ext_label(label) else DIM)
     safe_print(f"{meta}  {text}")
     log_file.write(line)
     log_file.flush()
-    BUS.publish("transcript", ts=ts, label=label, text=text)
+    BUS.publish("transcript", ts=ts, label=label, text=text, phase="final", **payload)
     return ts
 
 
@@ -219,6 +219,9 @@ def make_extractor(transcribe_path: str, metrics: LatencyTracker, app_dir: Path)
         model=model,
         fast_model=fast,
         out_path=path,
+        window_sec=float(os.environ.get("QA_WINDOW_SEC") or "45"),
+        interval_sec=float(os.environ.get("QA_INTERVAL_SEC") or "1"),
+        target_speakers=tuple(s.strip().upper() for s in (os.environ.get("QA_TARGET_SPEAKERS") or "EXT").split(",") if s.strip()),
         metrics=metrics,
         memory=SessionMemory(n),
         profile=ProfileIndex(profile_dir),
@@ -369,7 +372,8 @@ def main():
 
     logging.getLogger("pywhispercpp").setLevel(logging.ERROR)
     print(f"Loading Whisper {model_name} ({backend}) ...", flush=True)
-    worker = SttWorker(Transcriber(model_name, backend), tracker)
+    ws_url = os.environ.get("STT_WS_URL", "").strip()
+    worker = WebSocketSttWorker(ws_url) if ws_url else SttWorker(Transcriber(model_name, backend), tracker)
     chunk = os.environ.get("STT_CHUNK_SEC", "0.4")
     fast = (os.environ.get("LLM_FAST_MODEL") or "").strip()
 
@@ -423,6 +427,7 @@ def main():
                         channels=1,
                         dtype="float32",
                         samplerate=SAMPLE_RATE,
+                        blocksize=int(SAMPLE_RATE * 0.04),
                         callback=make_callback(queues[label], received[label]),
                     )
                 )
@@ -436,17 +441,30 @@ def main():
                     BUS.publish("status", text=f"Recognition failed: {info['error']}")
                 if info.get("stt_ms"):
                     metrics.observe("stt_ms", float(info["stt_ms"]))
+                if info.get("utterance_id"):
+                    texts = [" ".join(texts)]
+                if info.get("phase") == "partial":
+                    BUS.publish("transcript", ts=time.strftime("%H:%M:%S"), label=out_label,
+                                text=" ".join(texts), phase="partial", utterance_id=info.get("utterance_id"))
+                    return
+                if info.get("utterance_id") and not any(texts):
+                    BUS.publish("transcript", ts=time.strftime("%H:%M:%S"), label=out_label,
+                                text="", phase="final", utterance_id=info["utterance_id"])
+                    return
                 for text in texts:
                     norm = _norm_text(text)
                     prev = last_said.get(out_label)
-                    if prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or (norm and norm in prev[1])):
+                    if not info.get("utterance_id") and prev and time.time() - prev[0] < 4.0 and (norm == prev[1] or (norm and norm in prev[1])):
                         continue
                     last_said[out_label] = (time.time(), norm)
                     if is_ext_label(out_label):
                         recent_ext.append((time.time(), norm))
                     elif is_mic_label(out_label) and recent_ext and is_speaker_echo(norm, recent_ext):
+                        if info.get("utterance_id"):
+                            BUS.publish("transcript", ts=time.strftime("%H:%M:%S"), label=out_label,
+                                        text="", phase="final", utterance_id=info["utterance_id"])
                         continue
-                    ts = emit(log_file, out_label, text)
+                    ts = emit(log_file, out_label, text, utterance_id=info.get("utterance_id"))
                     extractor.add_ext(
                         ts,
                         f"[{out_label}] {text}",
@@ -467,14 +485,22 @@ def main():
                             continue
                         progressed = True
                         t_end = time.monotonic()
+                        if ws_url:
+                            worker.feed_frame(src_label, audio)
                         for seg in vads[src_label].accept(audio):
-                            worker.submit(src_label, seg, t_end=t_end)
+                            worker.submit(src_label, seg["audio"], t_end=t_end, phase=seg["phase"], utterance_id=seg["utterance_id"])
                     for out_label, texts, info in worker.drain():
                         progressed = True
                         handle_texts(out_label, texts, info)
                     if not progressed:
                         time.sleep(0.02)
             except KeyboardInterrupt:
+                for src_label, _ in sources:
+                    for seg in vads[src_label].flush():
+                        worker.submit(src_label, seg["audio"], phase="final", utterance_id=seg["utterance_id"])
+                worker.close()
+                for out_label, texts, info in worker.drain():
+                    handle_texts(out_label, texts, info)
                 print("\nStopped.", flush=True)
 
 

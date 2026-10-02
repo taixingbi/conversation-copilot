@@ -1018,8 +1018,12 @@
       const draft = ev.kind === "draft" || ev.kind === "fast";
       el.classList.toggle("draft", draft);
       el.querySelector(".q-text").textContent = ev.question || "";
+      el.querySelector(".q-label").textContent = ev.mode === "extraction" ? "CURRENT QUESTION" : "Q";
+      el.querySelector(".a-label").textContent = ev.mode === "extraction" ? "CONTEXT" : "A";
       const aEl = el.querySelector(".a-text");
-      if (ev.answer) {
+      if (ev.mode === "extraction") {
+        aEl.textContent = ev.context || "";
+      } else if (ev.answer) {
         renderText(aEl, ev.answer);
       } else {
         aEl.innerHTML = '<span class="dots"></span>';
@@ -1281,12 +1285,20 @@
         const line = `${ev.ts}|${ev.label}|${ev.text || ""}`;
         if (line === lastTx) return;
         lastTx = line;
-        const row = document.createElement("div");
+        let row = ev.utterance_id && [...transcript.children].find(r => r.dataset.utteranceId === ev.utterance_id);
+        if (row && ev.phase === "final" && !ev.text) {
+          row.remove();
+          return;
+        }
+        const existing = !!row;
+        if (!row) row = document.createElement("div");
+        if (ev.utterance_id) row.dataset.utteranceId = ev.utterance_id;
+        row.style.opacity = ev.phase === "partial" ? "0.65" : "1";
         const ext = String(ev.label || "").startsWith("EXT");
         row.className = "t" + (ext ? " ext" : "");
         row.innerHTML = `<div class="tx-meta"><span>${esc(ev.ts)}</span><span class="tx-speaker">${esc(ev.label)}</span></div><div class="tx-body">${esc(ev.text)}</div>`;
         const follow = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48;
-        transcript.appendChild(row);
+        if (!existing) transcript.appendChild(row);
         if (follow) transcript.scrollTop = transcript.scrollHeight;
         txLast.textContent = `[${ev.label}] ${ev.text || ""}`;
       } else if (ev.type === "qa_status") {
@@ -1295,7 +1307,7 @@
         const draft = ev.kind === "draft" || ev.kind === "fast";
         const q = ev.question || "";
         if (recentlyDeleted(q)) return;
-        let card = findCard(q);
+        let card = (ev.replaces_question && findCard(ev.replaces_question)) || findCard(q);
         if (card) {
           if (q && normQ(q) !== normQ(card.q)) {
             cards.delete(normQ(card.q));

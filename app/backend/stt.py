@@ -106,6 +106,8 @@ def usable_audio(audio: np.ndarray) -> np.ndarray | None:
 
 class Transcriber:
     def __init__(self, model_name: str | None = None, backend: str | None = None):
+        self.context = {}
+        self.vocabulary = os.environ.get("STT_VOCABULARY", "Amazon Bedrock, IAM, LangGraph, AWS, Lambda, boto3")
         self.model_name = model_name or resolve_model_name()
         self.backend = backend or resolve_backend(self.model_name)
         if self.backend == "faster":
@@ -152,13 +154,18 @@ class Transcriber:
         else:
             self._transcribe_metal(samples)
 
-    def transcribe(self, audio: np.ndarray) -> list[str]:
+    def transcribe(self, audio: np.ndarray, *, source: str = "MIC", phase: str = "final") -> list[str]:
         samples = usable_audio(audio)
         if samples is None:
             return []
+        prompt = f"Vocabulary: {getattr(self, 'vocabulary', 'Bedrock, IAM, LangGraph')}. " + self.context.get(source, "")
         if self.backend == "faster":
-            return self._transcribe_faster(samples)
-        return self._transcribe_metal(samples)
+            texts = self._transcribe_faster(samples, prompt)
+        else:
+            texts = self._transcribe_metal(samples, prompt)
+        if phase == "final" and texts:
+            self.context[source] = (self.context.get(source, "") + " " + " ".join(texts))[-2000:]
+        return texts
 
     def _keep(self, text: str) -> str:
         text = english_only((text or "").strip())
@@ -182,9 +189,9 @@ class Transcriber:
             return True
         return float(prob) >= need
 
-    def _transcribe_metal(self, samples: np.ndarray) -> list[str]:
+    def _transcribe_metal(self, samples: np.ndarray, prompt: str = "") -> list[str]:
         texts: list[str] = []
-        for seg in self.model.transcribe(samples):
+        for seg in self.model.transcribe(samples, initial_prompt=prompt):
             if not self._confident(seg):
                 continue
             text = self._keep(getattr(seg, "text", "") or "")
@@ -192,14 +199,15 @@ class Transcriber:
                 texts.append(text)
         return texts
 
-    def _transcribe_faster(self, samples: np.ndarray) -> list[str]:
+    def _transcribe_faster(self, samples: np.ndarray, prompt: str = "") -> list[str]:
         segments, _info = self.model.transcribe(
             samples,
             language="en",
             beam_size=1,
             vad_filter=False,
             without_timestamps=True,
-            condition_on_previous_text=False,
+            condition_on_previous_text=True,
+            initial_prompt=prompt or None,
         )
         texts: list[str] = []
         for seg in segments:
@@ -212,7 +220,7 @@ class Transcriber:
 
 
 class SttWorker:
-    """Embed + Whisper off the capture/VAD thread. Drops oldest jobs if behind."""
+    """Decode rolling utterances off capture; coalesce partials and preserve finals."""
 
     def __init__(self, stt: Transcriber, tracker=None, *, max_jobs: int = 4):
         self.stt = stt
@@ -231,22 +239,19 @@ class SttWorker:
         if not self._thread.is_alive():
             self._thread.start()
 
-    def submit(self, prefix: str, audio: np.ndarray, *, t_end: float | None = None) -> None:
+    def submit(self, prefix: str, audio: np.ndarray, *, t_end: float | None = None, phase: str = "final", utterance_id: str | None = None) -> None:
         samples = usable_audio(audio)
         if samples is None:
             return
-        job = (prefix, samples.copy(), t_end if t_end is not None else time.monotonic())
-        try:
-            self.jobs.put_nowait(job)
-        except queue.Full:
-            try:
-                self.jobs.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.jobs.put_nowait(job)
-            except queue.Full:
-                pass
+        job = (prefix, samples.copy(), t_end if t_end is not None else time.monotonic(), phase, utterance_id)
+        # Coalesce queued partials for this utterance; final jobs are never evicted.
+        with self.jobs.mutex:
+            self.jobs.queue = type(self.jobs.queue)(
+                old for old in self.jobs.queue
+                if not (old[0] == prefix and old[4] == utterance_id and old[3] == "partial")
+            )
+            self.jobs.queue.append(job)
+            self.jobs.not_empty.notify()
 
     def drain(self) -> list[tuple[str, list[str], dict]]:
         out: list[tuple[str, list[str], dict]] = []
@@ -260,16 +265,16 @@ class SttWorker:
     def close(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join()
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.is_set() or not self.jobs.empty():
             try:
-                prefix, audio, t_end = self.jobs.get(timeout=0.05)
+                prefix, audio, t_end, phase, utterance_id = self.jobs.get(timeout=0.05)
             except queue.Empty:
                 continue
             label = prefix
-            if self.tracker:
+            if self.tracker and phase == "final":
                 try:
                     label = self.tracker.assign(audio, prefix=prefix)
                 except Exception:
@@ -278,10 +283,109 @@ class SttWorker:
             with self._stt_lock:
                 stt = self.stt
             try:
-                texts = stt.transcribe(audio)
+                texts = stt.transcribe(audio, source=prefix, phase=phase) if utterance_id is not None else stt.transcribe(audio)
             except Exception as exc:
                 logger.exception("Transcription failed for %s", prefix)
-                self.results.put((label, [], {"error": str(exc), "seg_end": t_end}))
+                self.results.put((label, [], {"error": str(exc), "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None}))
                 continue
             stt_ms = (time.perf_counter() - t0) * 1000
-            self.results.put((label, texts, {"stt_ms": stt_ms, "seg_end": t_end}))
+            self.results.put((label, texts, {"stt_ms": stt_ms, "seg_end": t_end, "phase": phase, "utterance_id": f"{prefix}:{utterance_id}" if utterance_id is not None else None}))
+
+
+class WebSocketSttWorker:
+    """One persistent PCM connection per source (documented bridge protocol)."""
+
+    def __init__(self, url: str):
+        self.url = url
+        self.results = queue.Queue()
+        self.connections = {}
+        self.pending = set()
+        self._finals = threading.Condition()
+        self.threads = []
+        self.context = {}
+        self._stop = threading.Event()
+        self.stt = self
+        self.model_name = "streaming"
+
+    def warmup(self):
+        pass
+
+    def start(self):
+        pass
+
+    def set_transcriber(self, stt):
+        raise ValueError("Whisper model switching is unavailable with STT_WS_URL")
+
+    def feed_frame(self, source: str, audio: np.ndarray):
+        import json
+        import websocket
+
+        if source not in self.connections:
+            headers = []
+            token = os.environ.get("STT_WS_TOKEN", "")
+            if token:
+                headers.append(f"Authorization: Bearer {token}")
+            ws = websocket.create_connection(self.url, header=headers, timeout=5)
+            ws.settimeout(0.5)
+            ws.send(json.dumps({"type": "start", "source": source, "sample_rate": 16000,
+                                "encoding": "pcm_s16le", "frame_ms": 40,
+                                "vocabulary": os.environ.get("STT_VOCABULARY", "Bedrock,IAM,LangGraph,AWS").split(","),
+                                "context": self.context.get(source, "")}))
+            self.connections[source] = ws
+            thread = threading.Thread(target=self._receive, args=(source, ws), daemon=True)
+            thread.start()
+            self.threads.append(thread)
+        pcm = np.asarray(audio, dtype=np.float32).reshape(-1)
+        # Never send a binary message larger than 40 ms, even after a capture backlog.
+        for offset in range(0, pcm.size, 640):
+            frame = (np.clip(pcm[offset:offset + 640], -1, 1) * 32767).astype("<i2")
+            self.connections[source].send_binary(frame.tobytes())
+
+    def _receive(self, source, ws):
+        import json
+        import websocket
+        try:
+            while not self._stop.is_set():
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if not raw:
+                    raise ConnectionError("ASR WebSocket closed")
+                event = json.loads(raw)
+                phase = event.get("type")
+                if phase not in {"partial", "final"}:
+                    continue
+                uid = event["utterance_id"]
+                text = str(event.get("text", ""))
+                if phase == "final":
+                    with self._finals:
+                        self.pending.discard((source, str(uid)))
+                        self._finals.notify_all()
+                    self.context[source] = (self.context.get(source, "") + " " + text)[-2000:]
+                self.results.put((source, [text] if text else [], {
+                    "phase": phase, "utterance_id": f"{source}:{uid}",
+                    "seg_end": time.monotonic(),
+                }))
+        except Exception as exc:
+            if not self._stop.is_set():
+                self.results.put((source, [], {"error": str(exc)}))
+
+    def submit(self, prefix, audio, *, t_end=None, phase="final", utterance_id=None):
+        import json
+        if phase == "final" and prefix in self.connections:
+            with self._finals:
+                self.pending.add((prefix, str(utterance_id)))
+            self.connections[prefix].send(json.dumps({"type": "commit", "utterance_id": utterance_id,
+                                                       "context": self.context.get(prefix, "")}))
+
+    drain = SttWorker.drain
+
+    def close(self):
+        with self._finals:
+            self._finals.wait_for(lambda: not self.pending, timeout=5)
+        self._stop.set()
+        for ws in self.connections.values():
+            ws.close()
+        for thread in self.threads:
+            thread.join(timeout=1)

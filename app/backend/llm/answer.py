@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 from llm.client import ChatClient, strip_think
 from llm.prompt import qa_prompt, duplicate_question_prompt
+from llm.extract import extraction_prompt, parse_extraction, ExtractedQuestion
 
 _Q = re.compile(r"^Q:\s*", re.I)
 _A = re.compile(r"^A:\s*", re.I)
@@ -103,6 +104,15 @@ class LlmAnswerer:
             hits = self.profile.retrieve(query)
             background = "\n\n".join(hits)
         return history, background
+
+    def extract_latest(self, lines: list[str], *, current: str = "", previous: list[str] | None = None,
+                       speakers: tuple[str, ...] = ("EXT",)) -> ExtractedQuestion | None:
+        content = self.client.chat(
+            extraction_prompt(lines, current=current, previous=previous or [], speakers=speakers),
+            max_tokens=240,
+            model=self.fast_model,
+        )
+        return parse_extraction(content)
 
     def qa_from_ext(self, ext_lines: list[str], *, kind: str = "final") -> tuple[str, str]:
         prompt_kind = KIND_PROMPT.get(kind, "base")
